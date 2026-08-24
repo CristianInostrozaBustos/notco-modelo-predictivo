@@ -315,9 +315,13 @@ def evaluar_modelo(modelo, datos):
     return metricas, predicciones_por_entidad
 
 
+VERSION_ARQUITECTURA = "v2-capa-registrada"  # cambiar esta cadena invalida automáticamente
+                                              # cualquier modelo cacheado con una arquitectura anterior
+
+
 def calcular_huella_dataset(df, config, ventana, horizonte):
     resumen_filas = pd.util.hash_pandas_object(df, index=True).values.tobytes()
-    config_str = f"{config.columna_fecha}|{config.columna_entidad}|{config.columna_objetivo}|{sorted(config.columnas_exogenas)}|{ventana}|{horizonte}"
+    config_str = f"{config.columna_fecha}|{config.columna_entidad}|{config.columna_objetivo}|{sorted(config.columnas_exogenas)}|{ventana}|{horizonte}|{VERSION_ARQUITECTURA}"
     hasher = hashlib.sha256()
     hasher.update(resumen_filas)
     hasher.update(config_str.encode())
@@ -340,11 +344,18 @@ def entrenar_o_cargar_modelo(df, config, ventana, horizonte, epocas_solicitadas=
     if os.path.exists(ruta_modelo):
         try:
             modelo = keras.models.load_model(ruta_modelo, compile=False, safe_mode=False)
+            # sanity check: un modelo cargado puede "cargar" sin error pero
+            # fallar recién al predecir (ej. capas Lambda con closures
+            # rotos al recargarse en un proceso nuevo) — se valida con una
+            # predicción mínima antes de darlo por bueno
+            entrada_prueba = datos.X_test[:1]
+            entidad_prueba = datos.entidad_ids_test[:1].reshape(-1, 1)
+            modelo.predict([entrada_prueba, entidad_prueba], verbose=0)
             return modelo, datos, huella, False
         except Exception:
-            # archivo de caché corrupto (ej. entrenamiento interrumpido a
-            # mitad del guardado) — se descarta y se reentrena en vez de
-            # fallar silenciosamente cada vez que alguien use el sitio
+            # archivo de caché corrupto o incompatible (interrupción a
+            # mitad del guardado, o generado con una arquitectura vieja)
+            # — se descarta y se reentrena en vez de fallar en el sitio
             os.remove(ruta_modelo)
 
     modelo = construir_modelo_generico(
@@ -633,6 +644,13 @@ def render_seccion_dataset_propio():
     st.dataframe(tabla_metricas)
 
     st.subheader("Validación: real vs. pronóstico")
+    st.caption(
+        "Este gráfico NO es un pronóstico a futuro. Muestra qué tan bien predijo el "
+        "modelo un período histórico que se dejó aparte durante el entrenamiento "
+        "(el 'horizonte' que configuraste), comparando lo que el modelo predijo "
+        "contra lo que realmente pasó en esos días. Sirve para evaluar la precisión "
+        "del modelo, no para ver qué va a pasar adelante."
+    )
     entidad_graficar = st.selectbox("Entidad a graficar", options=list(resultado["predicciones"].keys()))
     pred_ent = resultado["predicciones"][entidad_graficar]
 
@@ -645,7 +663,10 @@ def render_seccion_dataset_propio():
         x=x, y=pred_ent["P10"], name="Rango P10–P90", line=dict(width=0),
         fill="tonexty", fillcolor="rgba(70,130,180,0.3)",
     ))
-    fig.update_layout(title=f"Validación — {entidad_graficar}", xaxis_title="Días", yaxis_title="Valor")
+    fig.update_layout(
+        title=f"Validación sobre datos históricos (no es pronóstico a futuro) — {entidad_graficar}",
+        xaxis_title="Días del período de prueba", yaxis_title="Valor",
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     modelo = st.session_state["motor_generico_modelo"]
@@ -673,29 +694,76 @@ def render_seccion_dataset_propio():
             c1, c2 = st.columns(2)
             entidad_whatif = c1.selectbox("Entidad a simular", options=list(datos.entidad_a_id.keys()), key="entidad_whatif")
             variable_afectada = c2.selectbox("Variable exógena afectada por el evento", options=config_guardada.columnas_exogenas)
-            c3, c4, c5 = st.columns(3)
-            dias_evento = c3.number_input("Duración del evento (días)", min_value=1, max_value=180, value=30)
-            cambio_pct = c4.slider("Cambio en la variable durante el evento (%)", -90, 200, 30) / 100
-            dias_horizonte_whatif = c5.number_input("Horizonte total del pronóstico (días)", min_value=dias_evento, max_value=365, value=max(60, dias_evento * 2))
+
+            df_guardado[config_guardada.columna_fecha] = pd.to_datetime(df_guardado[config_guardada.columna_fecha])
+            fecha_min_pronostico = df_guardado[config_guardada.columna_fecha].max() + pd.Timedelta(days=1)
+            st.caption(
+                f"El pronóstico solo puede proyectarse hacia adelante desde el fin del historial "
+                f"({fecha_min_pronostico.strftime('%Y-%m-%d')}). El evento puede ubicarse en cualquier "
+                f"punto dentro de ese horizonte (ej. más adelante en el año), pero no en fechas ya "
+                f"cubiertas por el historial."
+            )
+            c3, c4 = st.columns(2)
+            fecha_inicio_evento_input = c3.date_input(
+                "Inicio del evento", value=fecha_min_pronostico.date(), min_value=fecha_min_pronostico.date(),
+            )
+            fecha_fin_evento_input = c4.date_input(
+                "Fin del evento", value=(fecha_min_pronostico + pd.Timedelta(days=29)).date(), min_value=fecha_min_pronostico.date(),
+            )
+            c5, c6 = st.columns(2)
+            cambio_pct = c5.slider("Cambio en la variable durante el evento (%)", -90, 200, 30) / 100
+            dias_horizonte_whatif = c6.number_input(
+                "Horizonte total del pronóstico, desde el fin del historial (días)",
+                min_value=30, max_value=365, value=90,
+            )
             ejecutar_whatif = st.form_submit_button("Ejecutar escenario", type="primary")
 
         if ejecutar_whatif:
-            df_guardado[config_guardada.columna_fecha] = pd.to_datetime(df_guardado[config_guardada.columna_fecha])
-            ultima_fecha = df_guardado[config_guardada.columna_fecha].max()
-            fecha_inicio_evento = ultima_fecha + pd.Timedelta(days=1)
-            fecha_fin_evento = fecha_inicio_evento + pd.Timedelta(days=int(dias_evento) - 1)
+            fecha_inicio_evento = pd.Timestamp(fecha_inicio_evento_input)
+            fecha_fin_evento = pd.Timestamp(fecha_fin_evento_input)
+            ultima_fecha_pronostico = fecha_min_pronostico + pd.Timedelta(days=int(dias_horizonte_whatif) - 1)
+
+            if fecha_fin_evento < fecha_inicio_evento:
+                st.error("La fecha de fin del evento no puede ser anterior a la fecha de inicio.")
+                st.stop()
+            if fecha_fin_evento > ultima_fecha_pronostico:
+                st.error(
+                    f"El evento termina el {fecha_fin_evento.strftime('%Y-%m-%d')}, pero el horizonte "
+                    f"total del pronóstico solo llega hasta el {ultima_fecha_pronostico.strftime('%Y-%m-%d')}. "
+                    "Aumenta el horizonte total o acorta las fechas del evento."
+                )
+                st.stop()
 
             evento = EventoWhatIf(
                 variable_afectada=variable_afectada, fecha_inicio=fecha_inicio_evento,
                 fecha_fin=fecha_fin_evento, cambio_pct=cambio_pct, entidad=entidad_whatif,
             )
+            # línea base sin ningún cambio (cambio_pct=0), para poder
+            # aislar visualmente el efecto puro del evento — sin esto, el
+            # efecto de una variable con impacto chico queda tapado por
+            # la estacionalidad semanal/mensual normal del negocio
+            evento_base = EventoWhatIf(
+                variable_afectada=variable_afectada, fecha_inicio=fecha_inicio_evento,
+                fecha_fin=fecha_fin_evento, cambio_pct=0.0, entidad=entidad_whatif,
+            )
             with st.spinner("Generando pronóstico recursivo día a día..."):
+                # el pronóstico SIEMPRE arranca justo después del fin del
+                # historial (fecha_min_pronostico) — el evento puede caer
+                # en cualquier punto dentro de ese horizonte, no tiene que
+                # coincidir con el primer día pronosticado
                 trayectoria = construir_trayectoria_escenario(
                     df_guardado, config_guardada, evento,
-                    dias_horizonte=int(dias_horizonte_whatif), fecha_inicio_pronostico=fecha_inicio_evento,
+                    dias_horizonte=int(dias_horizonte_whatif), fecha_inicio_pronostico=fecha_min_pronostico,
+                )
+                trayectoria_base = construir_trayectoria_escenario(
+                    df_guardado, config_guardada, evento_base,
+                    dias_horizonte=int(dias_horizonte_whatif), fecha_inicio_pronostico=fecha_min_pronostico,
                 )
                 pronostico_whatif = pronostico_recursivo(
                     modelo, datos, df_guardado, config_guardada, entidad_whatif, trayectoria
+                )
+                pronostico_base = pronostico_recursivo(
+                    modelo, datos, df_guardado, config_guardada, entidad_whatif, trayectoria_base
                 )
 
             # aviso si el escenario empuja la variable fuera del rango que
@@ -708,12 +776,30 @@ def render_seccion_dataset_propio():
             hist_min, hist_max = rangos_historicos[variable_afectada]
             fuera_de_rango = (valores_evento.min() < hist_min) or (valores_evento.max() > hist_max)
 
+            dias_evento = (fecha_fin_evento - fecha_inicio_evento).days + 1
+            mask_dias_evento_pron = (pronostico_whatif[config_guardada.columna_fecha] >= fecha_inicio_evento) & (
+                pronostico_whatif[config_guardada.columna_fecha] <= fecha_fin_evento
+            )
+            diferencia_promedio = (
+                pronostico_whatif.loc[mask_dias_evento_pron, "P50"].values
+                - pronostico_base.loc[mask_dias_evento_pron, "P50"].values
+            ).mean()
+
+            # historial real previo al pronóstico, para dar contexto visual
+            # de dónde viene la curva (mismo criterio usado en NotCo)
+            historial_reciente = df_guardado[
+                (df_guardado[config_guardada.columna_entidad] == entidad_whatif)
+                & (df_guardado[config_guardada.columna_fecha] < fecha_min_pronostico)
+            ].sort_values(config_guardada.columna_fecha).tail(90)
+
             st.session_state["motor_generico_whatif"] = {
-                "pronostico": pronostico_whatif, "entidad": entidad_whatif,
+                "pronostico": pronostico_whatif, "pronostico_base": pronostico_base, "entidad": entidad_whatif,
                 "fecha_inicio_evento": fecha_inicio_evento, "fecha_fin_evento": fecha_fin_evento,
                 "fuera_de_rango": fuera_de_rango,
                 "rango_evento": (round(valores_evento.min(), 1), round(valores_evento.max(), 1)),
                 "rango_historico": (round(hist_min, 1), round(hist_max, 1)),
+                "diferencia_promedio": round(diferencia_promedio, 2),
+                "historial_reciente": historial_reciente,
             }
 
         whatif_resultado = st.session_state.get("motor_generico_whatif")
@@ -730,13 +816,24 @@ def render_seccion_dataset_propio():
                     "porcentaje de cambio más moderado para un escenario más realista."
                 )
             pron = whatif_resultado["pronostico"]
+            pron_base = whatif_resultado["pronostico_base"]
+            hist_reciente = whatif_resultado["historial_reciente"]
             fig_wi = go.Figure()
+            if len(hist_reciente) > 0:
+                fig_wi.add_trace(go.Scatter(
+                    x=hist_reciente[config_guardada.columna_fecha], y=hist_reciente[config_guardada.columna_objetivo],
+                    name="Historial reciente (real)", line=dict(color="white", width=1.5),
+                ))
             fig_wi.add_trace(go.Scatter(x=pron[config_guardada.columna_fecha], y=pron["P90"], line=dict(width=0), showlegend=False))
             fig_wi.add_trace(go.Scatter(
                 x=pron[config_guardada.columna_fecha], y=pron["P10"], line=dict(width=0),
-                fill="tonexty", fillcolor="rgba(70,130,180,0.3)", name="Rango P10–P90",
+                fill="tonexty", fillcolor="rgba(70,130,180,0.3)", name="Rango P10–P90 (con evento)",
             ))
-            fig_wi.add_trace(go.Scatter(x=pron[config_guardada.columna_fecha], y=pron["P50"], name="Predicción (P50)", line=dict(color="red", width=2)))
+            fig_wi.add_trace(go.Scatter(x=pron[config_guardada.columna_fecha], y=pron["P50"], name="Con evento (P50)", line=dict(color="red", width=2)))
+            fig_wi.add_trace(go.Scatter(
+                x=pron_base[config_guardada.columna_fecha], y=pron_base["P50"], name="Sin evento (línea base)",
+                line=dict(color="gray", width=2, dash="dot"),
+            ))
             fig_wi.add_vrect(
                 x0=whatif_resultado["fecha_inicio_evento"], x1=whatif_resultado["fecha_fin_evento"],
                 fillcolor="orange", opacity=0.15, annotation_text="Evento", line_width=0,
@@ -746,6 +843,13 @@ def render_seccion_dataset_propio():
                 xaxis_title="Fecha", yaxis_title=config_guardada.columna_objetivo, height=420,
             )
             st.plotly_chart(fig_wi, use_container_width=True)
+            st.caption(
+                f"Diferencia promedio durante el evento (con evento − sin evento): "
+                f"{whatif_resultado['diferencia_promedio']:+.2f} {config_guardada.columna_objetivo}/día. "
+                "La línea blanca es historial real; desde ahí en adelante todo es pronóstico. "
+                "La línea gris punteada muestra qué habría pronosticado el modelo sin el evento, "
+                "para que el efecto real se distinga de la estacionalidad normal del negocio."
+            )
 
     # ============================================================
     # POLÍTICA DE INVENTARIO (ROP / SS / Meta T)
