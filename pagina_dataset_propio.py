@@ -349,8 +349,7 @@ def render_seccion_dataset_propio():
         "Sube cualquier archivo CSV con datos de series temporales "
         "(ventas, demanda, tráfico, etc.) y el sitio detecta automáticamente "
         "la estructura, entrena un modelo de pronóstico por cuantiles y "
-        "muestra los resultados — sin necesidad de que el dataset tenga las "
-        "mismas columnas que el de NotCo."
+        "muestra los resultados."
     )
 
     archivo = st.file_uploader("Archivo CSV", type=["csv"])
