@@ -181,42 +181,51 @@ scalers_por_sku = preparar_scalers(ds, skus_lista)
 model_global = cargar_modelo(len(skus_lista))
 validacion = calcular_validacion(ds, model_global, scalers_por_sku, skus_lista, sku_a_id)
 
+
 # ============================================================
-# SIDEBAR
+# NAVEGACIÓN PRINCIPAL (estilo pestañas)
 # ============================================================
-st.sidebar.title("Modelo Predictivo")
-st.sidebar.markdown("Modelo LSTM global multi-SKU (tronco compartido + cabeza independiente por producto)")
-sku_sel = st.sidebar.selectbox("Selecciona un SKU", skus_lista, index=skus_lista.index("NotHotDog") if "NotHotDog" in skus_lista else 0)
-
-ds_sku = ds[ds["sku"] == sku_sel].sort_values("fecha").reset_index(drop=True)
-scaler_sku = scalers_por_sku[sku_sel]
-id_sku = sku_a_id[sku_sel]
-insumo_nombre = ds_sku["insumo_critico"].iloc[0]
-proc_primaria = ds_sku["procedencia_primaria"].iloc[0]
-proc_secundaria = ds_sku["procedencia_secundaria"].iloc[0]
-precio_secundario_normal = ds_sku["precio_unitario_secundario_clp"].iloc[0]
-precio_insumo_normal = ds_sku["precio_unitario_primario_clp"].iloc[0]
-
-sub_val = validacion[validacion["sku"] == sku_sel].copy()
-mape_sku = np.mean(np.abs((sub_val["demanda_real"] - sub_val["P50"]) / sub_val["demanda_real"])) * 100
-cobertura_sku = ((sub_val["demanda_real"] >= sub_val["P10"]) & (sub_val["demanda_real"] <= sub_val["P90"])).mean() * 100
-sigma_demanda = sub_val["demanda_real"].std()
-
-st.sidebar.markdown("---")
-st.sidebar.metric("MAPE (P50)", f"{mape_sku:.2f}%")
-st.sidebar.metric("Cobertura P10–P90", f"{cobertura_sku:.1f}%")
-st.sidebar.markdown(f"**Insumo crítico:** {insumo_nombre}")
-st.sidebar.markdown(f"**Procedencia primaria:** {proc_primaria}")
-st.sidebar.markdown(f"**Procedencia secundaria:** {proc_secundaria}")
-
-seccion = st.sidebar.radio(
-    "Sección",
-    ["1. Pronóstico y política ROP/SS", "2. Escenario what-if (estrés de abastecimiento)", "3. Simulación de inventario"],
+vista = st.radio(
+    "Vista", ["NotCo", "Sube tu propio dataset"],
+    horizontal=True, label_visibility="collapsed",
 )
+st.markdown("---")
 
-tab_notco, tab_propio = st.tabs(["NotCo", "Sube tu propio dataset"])
+if vista == "NotCo":
+    # ============================================================
+    # SIDEBAR
+    # ============================================================
+    st.sidebar.title("Modelo Predictivo")
+    st.sidebar.markdown("Modelo LSTM global multi-SKU (tronco compartido + cabeza independiente por producto)")
+    sku_sel = st.sidebar.selectbox("Selecciona un SKU", skus_lista, index=skus_lista.index("NotHotDog") if "NotHotDog" in skus_lista else 0)
 
-with tab_notco:
+    ds_sku = ds[ds["sku"] == sku_sel].sort_values("fecha").reset_index(drop=True)
+    scaler_sku = scalers_por_sku[sku_sel]
+    id_sku = sku_a_id[sku_sel]
+    insumo_nombre = ds_sku["insumo_critico"].iloc[0]
+    proc_primaria = ds_sku["procedencia_primaria"].iloc[0]
+    proc_secundaria = ds_sku["procedencia_secundaria"].iloc[0]
+    precio_secundario_normal = ds_sku["precio_unitario_secundario_clp"].iloc[0]
+    precio_insumo_normal = ds_sku["precio_unitario_primario_clp"].iloc[0]
+
+    sub_val = validacion[validacion["sku"] == sku_sel].copy()
+    mape_sku = np.mean(np.abs((sub_val["demanda_real"] - sub_val["P50"]) / sub_val["demanda_real"])) * 100
+    cobertura_sku = ((sub_val["demanda_real"] >= sub_val["P10"]) & (sub_val["demanda_real"] <= sub_val["P90"])).mean() * 100
+    sigma_demanda = sub_val["demanda_real"].std()
+
+    st.sidebar.markdown("---")
+    st.sidebar.metric("MAPE (P50)", f"{mape_sku:.2f}%")
+    st.sidebar.metric("Cobertura P10–P90", f"{cobertura_sku:.1f}%")
+    st.sidebar.markdown(f"**Insumo crítico:** {insumo_nombre}")
+    st.sidebar.markdown(f"**Procedencia primaria:** {proc_primaria}")
+    st.sidebar.markdown(f"**Procedencia secundaria:** {proc_secundaria}")
+
+    seccion = st.sidebar.radio(
+        "Sección",
+        ["1. Pronóstico y política ROP/SS", "2. Escenario what-if (estrés de abastecimiento)", "3. Simulación de inventario"],
+    )
+
+
     st.title(f"{sku_sel}")
 
     # ============================================================
@@ -464,7 +473,8 @@ with tab_notco:
                                yaxis_title="Unidades", height=420)
             st.plotly_chart(fig, use_container_width=True)
 
-with tab_propio:
+
+else:
     render_seccion_dataset_propio()
 
 st.markdown("---")
