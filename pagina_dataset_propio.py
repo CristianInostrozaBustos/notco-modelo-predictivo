@@ -616,11 +616,11 @@ def render_seccion_dataset_propio():
         )
         st.plotly_chart(
             graficar_serie_diaria(df, esquema.columna_fecha, esquema.columna_entidad, objetivo_preview),
-            use_container_width=True,
+            use_container_width=True, key="chart_preview_diaria",
         )
         st.plotly_chart(
             graficar_serie_mensual(df, esquema.columna_fecha, esquema.columna_entidad, objetivo_preview),
-            use_container_width=True,
+            use_container_width=True, key="chart_preview_mensual",
         )
 
     st.subheader("Confirma las columnas detectadas")
@@ -660,7 +660,7 @@ def render_seccion_dataset_propio():
     c4.metric("Entidades", resumen["n_entidades"])
 
     fig_resumen = graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
-    st.plotly_chart(fig_resumen, use_container_width=True)
+    st.plotly_chart(fig_resumen, use_container_width=True, key="chart_resumen_mensual")
     st.caption(
         "Este gráfico muestra el promedio mensual real del dataset, antes de "
         "entrenar nada — sirve para anticipar qué forma debería tener el "
@@ -733,7 +733,7 @@ def render_seccion_dataset_propio():
         title=f"Validación sobre datos históricos (no es pronóstico a futuro) — {entidad_graficar}",
         xaxis_title="Días del período de prueba", yaxis_title="Valor",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="chart_validacion")
 
     modelo = st.session_state["motor_generico_modelo"]
     datos = st.session_state["motor_generico_datos"]
@@ -904,7 +904,7 @@ def render_seccion_dataset_propio():
                 title=f"Pronóstico bajo el escenario — {whatif_resultado['entidad']}",
                 xaxis_title="Fecha", yaxis_title=config_guardada.columna_objetivo, height=420,
             )
-            st.plotly_chart(fig_wi, use_container_width=True)
+            st.plotly_chart(fig_wi, use_container_width=True, key="chart_whatif")
             st.caption(
                 f"Diferencia promedio durante el evento, respecto a un escenario sin el evento: "
                 f"{whatif_resultado['diferencia_promedio']:+.2f} {config_guardada.columna_objetivo}/día. "
