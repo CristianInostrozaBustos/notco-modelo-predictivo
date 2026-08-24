@@ -184,7 +184,7 @@ validacion = calcular_validacion(ds, model_global, scalers_por_sku, skus_lista, 
 # ============================================================
 # SIDEBAR
 # ============================================================
-st.sidebar.title("📦 NotCo — Modelo Predictivo")
+st.sidebar.title("Modelo Predictivo")
 st.sidebar.markdown("Modelo LSTM global multi-SKU (tronco compartido + cabeza independiente por producto)")
 sku_sel = st.sidebar.selectbox("Selecciona un SKU", skus_lista, index=skus_lista.index("NotHotDog") if "NotHotDog" in skus_lista else 0)
 
@@ -211,261 +211,260 @@ st.sidebar.markdown(f"**Procedencia secundaria:** {proc_secundaria}")
 
 seccion = st.sidebar.radio(
     "Sección",
-    ["1. Pronóstico y política ROP/SS", "2. Escenario what-if (estrés de abastecimiento)", "3. Simulación de inventario", "4. Sube tu propio dataset"],
+    ["1. Pronóstico y política ROP/SS", "2. Escenario what-if (estrés de abastecimiento)", "3. Simulación de inventario"],
 )
 
-if not seccion.startswith("4"):
+tab_notco, tab_propio = st.tabs(["NotCo", "Sube tu propio dataset"])
+
+with tab_notco:
     st.title(f"{sku_sel}")
 
-# ============================================================
-# SECCIÓN 1 — PRONÓSTICO + ROP/SS
-# ============================================================
-if seccion.startswith("1"):
-    st.header("Validación del modelo y política de inventario")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["demanda_real"], name="Demanda real",
-                              line=dict(color="black", width=2)))
-    fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["P50"], name="Predicción (P50)",
-                              line=dict(color="red", width=2)))
-    fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["P90"], name="P90", line=dict(width=0), showlegend=False))
-    fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["P10"], name="Rango P10–P90", line=dict(width=0),
-                              fill="tonexty", fillcolor="rgba(31,119,180,0.2)"))
-    fig.update_layout(title=f"Validación (últimos {HORIZONTE} días) — {sku_sel}",
-                       xaxis_title="Fecha", yaxis_title="Unidades/día", height=450)
-    st.plotly_chart(fig, use_container_width=True)
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Demanda promedio de validación", f"{sub_val['P50'].mean():.0f} u./día")
-    with col2:
-        lead_time_normal = ds_sku["lead_time_dias"].mean()
-        st.metric("Lead time promedio", f"{lead_time_normal:.0f} días")
-
-    st.subheader("Política de revisión periódica (P = 30 días)")
-    st.latex(r"T = d \times (L + P) + SS \qquad\qquad SS = Z \times \sigma \times \sqrt{L}")
-
-    demanda_actual = sub_val["P50"].mean()
-    meta, ss = calcular_meta_periodico(demanda_actual, sigma_demanda, lead_time_normal, P_REVISION, Z)
-    rop_diario, _ = calcular_rop_diario(demanda_actual, sigma_demanda, lead_time_normal, Z)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Meta (T) del mes", f"{meta:,} u.")
-    c2.metric("Stock de seguridad (SS)", f"{ss:,} u.")
-    c3.metric("ROP diario (alarma)", f"{rop_diario:,} u.")
-
-# ============================================================
-# SECCIÓN 2 — ESCENARIO WHAT-IF
-# ============================================================
-elif seccion.startswith("2"):
-    st.header(f"Escenario what-if: estrés de abastecimiento — {insumo_nombre} ({proc_primaria})")
-    st.caption("Simula un evento de estrés (ej. sequía, disrupción logística) en el proveedor primario del insumo crítico de este SKU.")
-
-    with st.form("form_escenario"):
-        c1, c2, c3 = st.columns(3)
-        fecha_inicio = c1.date_input("Inicio del evento", pd.Timestamp("2025-12-15"))
-        fecha_recuperacion = c2.date_input("Inicio de recuperación", pd.Timestamp("2026-02-03"))
-        fecha_fin_evento = c3.date_input("Recuperación completa", pd.Timestamp("2026-02-15"))
-        c4, c5 = st.columns(2)
-        incremento_precio = c4.slider("Sobrecosto del insumo durante el evento (%)", 0, 100, 19) / 100
-        elasticidad = c5.slider("Elasticidad precio-demanda", -1.0, 0.0, -0.3, 0.05)
-        fecha_fin_pron = st.date_input("Horizonte de pronóstico hasta", pd.Timestamp("2026-04-30"))
-        ejecutar = st.form_submit_button("Ejecutar escenario", type="primary")
-
-    if ejecutar:
-        fecha_inicio_sequia = pd.Timestamp(fecha_inicio)
-        fecha_inicio_lluvia = pd.Timestamp(fecha_recuperacion)
-        fecha_fin_cosecha = pd.Timestamp(fecha_fin_evento)
-        fecha_fin_pronostico = pd.Timestamp(fecha_fin_pron)
-
-        np.random.seed(SEMILLA)
-        umbral_estres = ds_sku["indice_estres_insumos"].quantile(0.85)
-        estres_normal_vals = ds_sku["indice_estres_insumos"].values
-        estres_altos_vals = ds_sku[ds_sku["indice_estres_insumos"] >= umbral_estres]["indice_estres_insumos"].values
-        lead_time_normal = ds_sku["lead_time_dias"].mean()
-        lead_time_sequia = ds_sku[ds_sku["indice_estres_insumos"] >= umbral_estres]["lead_time_dias"].mean()
-
-        precio_normal = ds_sku[ds_sku["fecha_dt"] < fecha_inicio_sequia]["precio_clp"].iloc[-1]
-        precio_sequia = precio_normal * (1 + incremento_precio)
-        precio_primario_sequia = precio_insumo_normal * (1 + incremento_precio)
-
-        ds_sku_escenario = ds_sku.copy()
-        ds_sku_escenario["precio_clp"] = ds_sku_escenario["precio_clp"].astype("float64")
-        mask_dic = ds_sku_escenario["fecha_dt"] >= fecha_inicio_sequia
-        n_dias_evento_hist = mask_dic.sum()
-        if n_dias_evento_hist > 0:
-            ds_sku_escenario.loc[mask_dic, "indice_estres_insumos"] = np.random.choice(estres_altos_vals, n_dias_evento_hist)
-            ds_sku_escenario.loc[mask_dic, "precio_clp"] = precio_sequia
-
-        futuro = pd.DataFrame({"fecha_dt": pd.date_range(ds_sku["fecha_dt"].max() + pd.Timedelta(days=1), fecha_fin_pronostico, freq="D")})
-        futuro["promocion"] = 0
-
-        def estres_precio_dia(fecha):
-            if fecha < fecha_inicio_lluvia:
-                return np.random.choice(estres_altos_vals), precio_sequia
-            elif fecha < fecha_fin_cosecha:
-                avance = (fecha - fecha_inicio_lluvia).days / max(1, (fecha_fin_cosecha - fecha_inicio_lluvia).days)
-                estres = np.random.choice(estres_altos_vals) * (1 - avance) + np.random.choice(estres_normal_vals) * avance
-                precio = precio_sequia + (precio_normal - precio_sequia) * avance
-                return estres, precio
-            else:
-                return np.random.choice(estres_normal_vals), precio_normal
-
-        futuro[["indice_estres_insumos", "precio_clp"]] = futuro["fecha_dt"].apply(lambda f: pd.Series(estres_precio_dia(f)))
-
-        historial_esc = scaler_sku.transform(ds_sku_escenario[VARIABLES].values.astype("float32"))
-        ventana = historial_esc[-VENTANA:].copy()
-
-        progreso = st.progress(0.0, text="Generando pronóstico recursivo día a día...")
-        pred_futuro = {"fecha": [], "P10": [], "P50": [], "P90": []}
-        for idx, (_, fila) in enumerate(futuro.iterrows()):
-            entrada = {"serie": ventana.reshape(1, VENTANA, len(VARIABLES)), "sku_id": np.array([[id_sku]])}
-            pred = model_global.predict(entrada, verbose=0)
-            p10_b = max(0, desescalar_sku(pred["P10"].flatten(), sku_sel, scalers_por_sku)[0])
-            p50_b = max(0, desescalar_sku(pred["P50"].flatten(), sku_sel, scalers_por_sku)[0])
-            p90_b = max(0, desescalar_sku(pred["P90"].flatten(), sku_sel, scalers_por_sku)[0])
-
-            factor = 1 + elasticidad * ((fila["precio_clp"] / precio_normal) - 1)
-            pred_futuro["fecha"].append(fila["fecha_dt"])
-            pred_futuro["P10"].append(p10_b * factor)
-            pred_futuro["P50"].append(p50_b * factor)
-            pred_futuro["P90"].append(p90_b * factor)
-
-            nueva_fila = np.array([[p50_b, fila["promocion"], fila["indice_estres_insumos"], fila["precio_clp"]]], dtype="float32")
-            ventana = np.vstack([ventana[1:], scaler_sku.transform(nueva_fila)])
-            progreso.progress((idx + 1) / len(futuro))
-        progreso.empty()
-
-        pronostico_futuro = pd.DataFrame(pred_futuro)
-        st.session_state["pronostico_futuro"] = pronostico_futuro
-        st.session_state["params_escenario"] = dict(
-            fecha_inicio_sequia=fecha_inicio_sequia, fecha_inicio_lluvia=fecha_inicio_lluvia,
-            fecha_fin_cosecha=fecha_fin_cosecha, lead_time_normal=lead_time_normal, lead_time_sequia=lead_time_sequia,
-            precio_primario_sequia=precio_primario_sequia,
-        )
-
-    if "pronostico_futuro" in st.session_state:
-        pronostico_futuro = st.session_state["pronostico_futuro"]
-        p = st.session_state["params_escenario"]
-
-        hist_reciente = ds_sku[ds_sku["fecha_dt"] >= ds_sku["fecha_dt"].max() - pd.Timedelta(days=90)]
+    # ============================================================
+    # SECCIÓN 1 — PRONÓSTICO + ROP/SS
+    # ============================================================
+    if seccion.startswith("1"):
+        st.header("Validación del modelo y política de inventario")
 
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=hist_reciente["fecha_dt"], y=hist_reciente["demanda_unidades"],
-                                  name="Historial reciente", line=dict(color="gray", width=1.5)))
-        fig.add_trace(go.Scatter(x=pronostico_futuro["fecha"], y=pronostico_futuro["P90"], line=dict(width=0), showlegend=False))
-        fig.add_trace(go.Scatter(x=pronostico_futuro["fecha"], y=pronostico_futuro["P10"], line=dict(width=0),
-                                  fill="tonexty", fillcolor="rgba(31,119,180,0.2)", name="Rango P10–P90"))
-        fig.add_trace(go.Scatter(x=pronostico_futuro["fecha"], y=pronostico_futuro["P50"], name="Predicción (P50)",
+        fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["demanda_real"], name="Demanda real",
+                                  line=dict(color="white", width=2)))
+        fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["P50"], name="Predicción (P50)",
                                   line=dict(color="red", width=2)))
-        fig.add_vrect(x0=p["fecha_inicio_lluvia"], x1=p["fecha_fin_cosecha"], fillcolor="orange", opacity=0.15,
-                      annotation_text="Recuperación", line_width=0)
-        fig.update_layout(title="Pronóstico bajo el escenario simulado", xaxis_title="Fecha",
-                           yaxis_title="Unidades/día", height=450)
+        fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["P90"], name="P90", line=dict(width=0), showlegend=False))
+        fig.add_trace(go.Scatter(x=sub_val["fecha"], y=sub_val["P10"], name="Rango P10–P90", line=dict(width=0),
+                                  fill="tonexty", fillcolor="rgba(31,119,180,0.2)"))
+        fig.update_layout(title=f"Validación (últimos {HORIZONTE} días) — {sku_sel}",
+                           xaxis_title="Fecha", yaxis_title="Unidades/día", height=450)
         st.plotly_chart(fig, use_container_width=True)
 
-        demanda_evento = pronostico_futuro[pronostico_futuro.fecha < p["fecha_inicio_lluvia"]]["P50"].mean()
-        demanda_recuperada = pronostico_futuro[pronostico_futuro.fecha >= p["fecha_fin_cosecha"]]["P50"].mean()
-        c1, c2 = st.columns(2)
-        c1.metric("Demanda proyectada durante el evento", f"{demanda_evento:.0f} u./día")
-        c2.metric("Demanda proyectada ya recuperado", f"{demanda_recuperada:.0f} u./día")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Demanda promedio de validación", f"{sub_val['P50'].mean():.0f} u./día")
+        with col2:
+            lead_time_normal = ds_sku["lead_time_dias"].mean()
+            st.metric("Lead time promedio", f"{lead_time_normal:.0f} días")
 
-        st.subheader(f"Costo de abastecimiento: {proc_primaria} (afectado) vs. {proc_secundaria} (alternativo)")
-        meses_resumen = pronostico_futuro.copy()
-        meses_resumen["mes"] = meses_resumen["fecha"].dt.to_period("M")
-        tabla_costo = []
-        for periodo, grupo in meses_resumen.groupby("mes"):
-            d_mes = grupo["P50"].mean()
-            dias = len(grupo)
-            precio_evento = p["precio_primario_sequia"] if periodo.to_timestamp() < p["fecha_inicio_lluvia"] else precio_insumo_normal
-            costo_primario = d_mes * dias * precio_evento
-            costo_secundario = d_mes * dias * precio_secundario_normal
-            tabla_costo.append({"Mes": periodo.strftime("%B %Y"), f"Costo {proc_primaria}": f"${costo_primario:,.0f}",
-                                 f"Costo {proc_secundaria}": f"${costo_secundario:,.0f}",
-                                 "Ahorro cambiando de proveedor": f"${costo_primario - costo_secundario:,.0f}"})
-        st.dataframe(pd.DataFrame(tabla_costo), use_container_width=True, hide_index=True)
+        st.subheader("Política de revisión periódica (P = 30 días)")
+        st.latex(r"T = d \times (L + P) + SS \qquad\qquad SS = Z \times \sigma \times \sqrt{L}")
 
-# ============================================================
-# SECCIÓN 3 — SIMULACIÓN DE INVENTARIO (política híbrida)
-# ============================================================
-elif seccion.startswith("3"):
-    st.header("Simulación de la política de inventario")
-    st.caption("Sistema híbrido: revisión periódica mensual (nivel meta) + monitoreo diario con gatillo de compra de emergencia.")
+        demanda_actual = sub_val["P50"].mean()
+        meta, ss = calcular_meta_periodico(demanda_actual, sigma_demanda, lead_time_normal, P_REVISION, Z)
+        rop_diario, _ = calcular_rop_diario(demanda_actual, sigma_demanda, lead_time_normal, Z)
 
-    if "pronostico_futuro" not in st.session_state:
-        st.warning("Primero ejecuta un escenario en la sección 2 para poder comparar 'normal' vs. 'evento simulado' en esta simulación.")
-    else:
-        pronostico_evento = st.session_state["pronostico_futuro"]
-        p = st.session_state["params_escenario"]
-        lead_time_normal = p["lead_time_normal"]
-        lead_time_evento = p["lead_time_sequia"]
-        precio_evento = p["precio_primario_sequia"]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Meta (T) del mes", f"{meta:,} u.")
+        c2.metric("Stock de seguridad (SS)", f"{ss:,} u.")
+        c3.metric("ROP diario (alarma)", f"{rop_diario:,} u.")
 
-        inventario_inicial = ds_sku["inventario_unidades"].iloc[-1]
-        st.metric("Inventario inicial (último dato real del dataset)", f"{inventario_inicial:,.0f} u.")
+    # ============================================================
+    # SECCIÓN 2 — ESCENARIO WHAT-IF
+    # ============================================================
+    elif seccion.startswith("2"):
+        st.header(f"Escenario what-if: estrés de abastecimiento — {insumo_nombre} ({proc_primaria})")
+        st.caption("Simula un evento de estrés (ej. sequía, disrupción logística) en el proveedor primario del insumo crítico de este SKU.")
 
-        meses = sorted(pronostico_evento["fecha"].dt.to_period("M").unique())
+        with st.form("form_escenario"):
+            c1, c2, c3 = st.columns(3)
+            fecha_inicio = c1.date_input("Inicio del evento", pd.Timestamp("2025-12-15"))
+            fecha_recuperacion = c2.date_input("Inicio de recuperación", pd.Timestamp("2026-02-03"))
+            fecha_fin_evento = c3.date_input("Recuperación completa", pd.Timestamp("2026-02-15"))
+            c4, c5 = st.columns(2)
+            incremento_precio = c4.slider("Sobrecosto del insumo durante el evento (%)", 0, 100, 19) / 100
+            elasticidad = c5.slider("Elasticidad precio-demanda", -1.0, 0.0, -0.3, 0.05)
+            fecha_fin_pron = st.date_input("Horizonte de pronóstico hasta", pd.Timestamp("2026-04-30"))
+            ejecutar = st.form_submit_button("Ejecutar escenario", type="primary")
 
-        def simular():
-            """Simula la política híbrida (mensual + monitoreo diario) sobre el escenario
-            ejecutado en la sección 2. La demanda de cada mes viene del pronóstico del
-            modelo bajo ese escenario (no un promedio histórico)."""
-            inventario = inventario_inicial
-            filas = []
-            emergencias = 0
-            for periodo in meses:
-                grupo = pronostico_evento[pronostico_evento["fecha"].dt.to_period("M") == periodo]
-                demanda_mes = grupo["P50"].mean()
-                dias_mes = len(grupo)
-                lt_mes = lead_time_evento if periodo.to_timestamp() < p["fecha_inicio_lluvia"] else lead_time_normal
+        if ejecutar:
+            fecha_inicio_sequia = pd.Timestamp(fecha_inicio)
+            fecha_inicio_lluvia = pd.Timestamp(fecha_recuperacion)
+            fecha_fin_cosecha = pd.Timestamp(fecha_fin_evento)
+            fecha_fin_pronostico = pd.Timestamp(fecha_fin_pron)
 
-                meta_mes, ss_mes = calcular_meta_periodico(demanda_mes, sigma_demanda, lt_mes, P_REVISION, Z)
-                rop_diario, _ = calcular_rop_diario(demanda_mes, sigma_demanda, lt_mes, Z)
+            np.random.seed(SEMILLA)
+            umbral_estres = ds_sku["indice_estres_insumos"].quantile(0.85)
+            estres_normal_vals = ds_sku["indice_estres_insumos"].values
+            estres_altos_vals = ds_sku[ds_sku["indice_estres_insumos"] >= umbral_estres]["indice_estres_insumos"].values
+            lead_time_normal = ds_sku["lead_time_dias"].mean()
+            lead_time_sequia = ds_sku[ds_sku["indice_estres_insumos"] >= umbral_estres]["lead_time_dias"].mean()
 
-                remanente_inicio = inventario
-                pedido = max(0, meta_mes - remanente_inicio)
-                inventario = remanente_inicio + pedido
+            precio_normal = ds_sku[ds_sku["fecha_dt"] < fecha_inicio_sequia]["precio_clp"].iloc[-1]
+            precio_sequia = precio_normal * (1 + incremento_precio)
+            precio_primario_sequia = precio_insumo_normal * (1 + incremento_precio)
 
-                emergencia = False
-                monto_emergencia = 0
-                consumo_total = 0
-                for _ in range(dias_mes):
-                    inventario -= demanda_mes
-                    consumo_total += demanda_mes
-                    if inventario < rop_diario and not emergencia:
-                        monto_emergencia = meta_mes - inventario
-                        inventario += monto_emergencia
-                        emergencia = True
-                        emergencias += 1
-                inventario = max(0, inventario)
+            ds_sku_escenario = ds_sku.copy()
+            ds_sku_escenario["precio_clp"] = ds_sku_escenario["precio_clp"].astype("float64")
+            mask_dic = ds_sku_escenario["fecha_dt"] >= fecha_inicio_sequia
+            n_dias_evento_hist = mask_dic.sum()
+            if n_dias_evento_hist > 0:
+                ds_sku_escenario.loc[mask_dic, "indice_estres_insumos"] = np.random.choice(estres_altos_vals, n_dias_evento_hist)
+                ds_sku_escenario.loc[mask_dic, "precio_clp"] = precio_sequia
 
-                filas.append({"Mes": periodo.strftime("%B %Y"), "Remanente inicio": round(remanente_inicio),
-                               "Meta (T)": meta_mes, "ROP diario (alarma)": rop_diario, "Pedido mensual": round(pedido),
-                               "Consumo del mes": round(consumo_total), "Emergencia": "Sí" if emergencia else "No",
-                               "Monto emergencia": round(monto_emergencia), "Inventario fin de mes": round(inventario)})
-            return pd.DataFrame(filas), emergencias
+            futuro = pd.DataFrame({"fecha_dt": pd.date_range(ds_sku["fecha_dt"].max() + pd.Timedelta(days=1), fecha_fin_pronostico, freq="D")})
+            futuro["promocion"] = 0
 
-        tabla_sim, n_emergencias = simular()
+            def estres_precio_dia(fecha):
+                if fecha < fecha_inicio_lluvia:
+                    return np.random.choice(estres_altos_vals), precio_sequia
+                elif fecha < fecha_fin_cosecha:
+                    avance = (fecha - fecha_inicio_lluvia).days / max(1, (fecha_fin_cosecha - fecha_inicio_lluvia).days)
+                    estres = np.random.choice(estres_altos_vals) * (1 - avance) + np.random.choice(estres_normal_vals) * avance
+                    precio = precio_sequia + (precio_normal - precio_sequia) * avance
+                    return estres, precio
+                else:
+                    return np.random.choice(estres_normal_vals), precio_normal
 
-        st.subheader("Simulación mes a mes bajo el escenario ejecutado en la sección 2")
-        st.dataframe(tabla_sim, use_container_width=True, hide_index=True)
-        st.metric("Compras de emergencia disparadas", n_emergencias)
+            futuro[["indice_estres_insumos", "precio_clp"]] = futuro["fecha_dt"].apply(lambda f: pd.Series(estres_precio_dia(f)))
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=tabla_sim["Mes"], y=tabla_sim["Inventario fin de mes"], name="Inventario fin de mes",
-                                  mode="lines+markers", line=dict(color="steelblue", width=2)))
-        fig.add_trace(go.Scatter(x=tabla_sim["Mes"], y=tabla_sim["ROP diario (alarma)"], name="Umbral de alarma (ROP diario)",
-                                  mode="lines", line=dict(color="firebrick", dash="dash")))
-        fig.add_trace(go.Scatter(x=tabla_sim["Mes"], y=tabla_sim["Meta (T)"], name="Meta (T)",
-                                  mode="lines", line=dict(color="green", dash="dot")))
-        fig.update_layout(title="Evolución del inventario vs. umbrales de la política", xaxis_title="Mes",
-                           yaxis_title="Unidades", height=420)
-        st.plotly_chart(fig, use_container_width=True)
+            historial_esc = scaler_sku.transform(ds_sku_escenario[VARIABLES].values.astype("float32"))
+            ventana = historial_esc[-VENTANA:].copy()
 
-# ============================================================
-# SECCIÓN 4 — SUBE TU PROPIO DATASET (motor genérico)
-# ============================================================
-elif seccion.startswith("4"):
+            progreso = st.progress(0.0, text="Generando pronóstico recursivo día a día...")
+            pred_futuro = {"fecha": [], "P10": [], "P50": [], "P90": []}
+            for idx, (_, fila) in enumerate(futuro.iterrows()):
+                entrada = {"serie": ventana.reshape(1, VENTANA, len(VARIABLES)), "sku_id": np.array([[id_sku]])}
+                pred = model_global.predict(entrada, verbose=0)
+                p10_b = max(0, desescalar_sku(pred["P10"].flatten(), sku_sel, scalers_por_sku)[0])
+                p50_b = max(0, desescalar_sku(pred["P50"].flatten(), sku_sel, scalers_por_sku)[0])
+                p90_b = max(0, desescalar_sku(pred["P90"].flatten(), sku_sel, scalers_por_sku)[0])
+
+                factor = 1 + elasticidad * ((fila["precio_clp"] / precio_normal) - 1)
+                pred_futuro["fecha"].append(fila["fecha_dt"])
+                pred_futuro["P10"].append(p10_b * factor)
+                pred_futuro["P50"].append(p50_b * factor)
+                pred_futuro["P90"].append(p90_b * factor)
+
+                nueva_fila = np.array([[p50_b, fila["promocion"], fila["indice_estres_insumos"], fila["precio_clp"]]], dtype="float32")
+                ventana = np.vstack([ventana[1:], scaler_sku.transform(nueva_fila)])
+                progreso.progress((idx + 1) / len(futuro))
+            progreso.empty()
+
+            pronostico_futuro = pd.DataFrame(pred_futuro)
+            st.session_state["pronostico_futuro"] = pronostico_futuro
+            st.session_state["params_escenario"] = dict(
+                fecha_inicio_sequia=fecha_inicio_sequia, fecha_inicio_lluvia=fecha_inicio_lluvia,
+                fecha_fin_cosecha=fecha_fin_cosecha, lead_time_normal=lead_time_normal, lead_time_sequia=lead_time_sequia,
+                precio_primario_sequia=precio_primario_sequia,
+            )
+
+        if "pronostico_futuro" in st.session_state:
+            pronostico_futuro = st.session_state["pronostico_futuro"]
+            p = st.session_state["params_escenario"]
+
+            hist_reciente = ds_sku[ds_sku["fecha_dt"] >= ds_sku["fecha_dt"].max() - pd.Timedelta(days=90)]
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=hist_reciente["fecha_dt"], y=hist_reciente["demanda_unidades"],
+                                      name="Historial reciente", line=dict(color="gray", width=1.5)))
+            fig.add_trace(go.Scatter(x=pronostico_futuro["fecha"], y=pronostico_futuro["P90"], line=dict(width=0), showlegend=False))
+            fig.add_trace(go.Scatter(x=pronostico_futuro["fecha"], y=pronostico_futuro["P10"], line=dict(width=0),
+                                      fill="tonexty", fillcolor="rgba(31,119,180,0.2)", name="Rango P10–P90"))
+            fig.add_trace(go.Scatter(x=pronostico_futuro["fecha"], y=pronostico_futuro["P50"], name="Predicción (P50)",
+                                      line=dict(color="red", width=2)))
+            fig.add_vrect(x0=p["fecha_inicio_lluvia"], x1=p["fecha_fin_cosecha"], fillcolor="orange", opacity=0.15,
+                          annotation_text="Recuperación", line_width=0)
+            fig.update_layout(title="Pronóstico bajo el escenario simulado", xaxis_title="Fecha",
+                               yaxis_title="Unidades/día", height=450)
+            st.plotly_chart(fig, use_container_width=True)
+
+            demanda_evento = pronostico_futuro[pronostico_futuro.fecha < p["fecha_inicio_lluvia"]]["P50"].mean()
+            demanda_recuperada = pronostico_futuro[pronostico_futuro.fecha >= p["fecha_fin_cosecha"]]["P50"].mean()
+            c1, c2 = st.columns(2)
+            c1.metric("Demanda proyectada durante el evento", f"{demanda_evento:.0f} u./día")
+            c2.metric("Demanda proyectada ya recuperado", f"{demanda_recuperada:.0f} u./día")
+
+            st.subheader(f"Costo de abastecimiento: {proc_primaria} (afectado) vs. {proc_secundaria} (alternativo)")
+            meses_resumen = pronostico_futuro.copy()
+            meses_resumen["mes"] = meses_resumen["fecha"].dt.to_period("M")
+            tabla_costo = []
+            for periodo, grupo in meses_resumen.groupby("mes"):
+                d_mes = grupo["P50"].mean()
+                dias = len(grupo)
+                precio_evento = p["precio_primario_sequia"] if periodo.to_timestamp() < p["fecha_inicio_lluvia"] else precio_insumo_normal
+                costo_primario = d_mes * dias * precio_evento
+                costo_secundario = d_mes * dias * precio_secundario_normal
+                tabla_costo.append({"Mes": periodo.strftime("%B %Y"), f"Costo {proc_primaria}": f"${costo_primario:,.0f}",
+                                     f"Costo {proc_secundaria}": f"${costo_secundario:,.0f}",
+                                     "Ahorro cambiando de proveedor": f"${costo_primario - costo_secundario:,.0f}"})
+            st.dataframe(pd.DataFrame(tabla_costo), use_container_width=True, hide_index=True)
+
+    # ============================================================
+    # SECCIÓN 3 — SIMULACIÓN DE INVENTARIO (política híbrida)
+    # ============================================================
+    elif seccion.startswith("3"):
+        st.header("Simulación de la política de inventario")
+        st.caption("Sistema híbrido: revisión periódica mensual (nivel meta) + monitoreo diario con gatillo de compra de emergencia.")
+
+        if "pronostico_futuro" not in st.session_state:
+            st.warning("Primero ejecuta un escenario en la sección 2 para poder comparar 'normal' vs. 'evento simulado' en esta simulación.")
+        else:
+            pronostico_evento = st.session_state["pronostico_futuro"]
+            p = st.session_state["params_escenario"]
+            lead_time_normal = p["lead_time_normal"]
+            lead_time_evento = p["lead_time_sequia"]
+            precio_evento = p["precio_primario_sequia"]
+
+            inventario_inicial = ds_sku["inventario_unidades"].iloc[-1]
+            st.metric("Inventario inicial (último dato real del dataset)", f"{inventario_inicial:,.0f} u.")
+
+            meses = sorted(pronostico_evento["fecha"].dt.to_period("M").unique())
+
+            def simular():
+                """Simula la política híbrida (mensual + monitoreo diario) sobre el escenario
+                ejecutado en la sección 2. La demanda de cada mes viene del pronóstico del
+                modelo bajo ese escenario (no un promedio histórico)."""
+                inventario = inventario_inicial
+                filas = []
+                emergencias = 0
+                for periodo in meses:
+                    grupo = pronostico_evento[pronostico_evento["fecha"].dt.to_period("M") == periodo]
+                    demanda_mes = grupo["P50"].mean()
+                    dias_mes = len(grupo)
+                    lt_mes = lead_time_evento if periodo.to_timestamp() < p["fecha_inicio_lluvia"] else lead_time_normal
+
+                    meta_mes, ss_mes = calcular_meta_periodico(demanda_mes, sigma_demanda, lt_mes, P_REVISION, Z)
+                    rop_diario, _ = calcular_rop_diario(demanda_mes, sigma_demanda, lt_mes, Z)
+
+                    remanente_inicio = inventario
+                    pedido = max(0, meta_mes - remanente_inicio)
+                    inventario = remanente_inicio + pedido
+
+                    emergencia = False
+                    monto_emergencia = 0
+                    consumo_total = 0
+                    for _ in range(dias_mes):
+                        inventario -= demanda_mes
+                        consumo_total += demanda_mes
+                        if inventario < rop_diario and not emergencia:
+                            monto_emergencia = meta_mes - inventario
+                            inventario += monto_emergencia
+                            emergencia = True
+                            emergencias += 1
+                    inventario = max(0, inventario)
+
+                    filas.append({"Mes": periodo.strftime("%B %Y"), "Remanente inicio": round(remanente_inicio),
+                                   "Meta (T)": meta_mes, "ROP diario (alarma)": rop_diario, "Pedido mensual": round(pedido),
+                                   "Consumo del mes": round(consumo_total), "Emergencia": "Sí" if emergencia else "No",
+                                   "Monto emergencia": round(monto_emergencia), "Inventario fin de mes": round(inventario)})
+                return pd.DataFrame(filas), emergencias
+
+            tabla_sim, n_emergencias = simular()
+
+            st.subheader("Simulación mes a mes bajo el escenario ejecutado en la sección 2")
+            st.dataframe(tabla_sim, use_container_width=True, hide_index=True)
+            st.metric("Compras de emergencia disparadas", n_emergencias)
+
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=tabla_sim["Mes"], y=tabla_sim["Inventario fin de mes"], name="Inventario fin de mes",
+                                      mode="lines+markers", line=dict(color="steelblue", width=2)))
+            fig.add_trace(go.Scatter(x=tabla_sim["Mes"], y=tabla_sim["ROP diario (alarma)"], name="Umbral de alarma (ROP diario)",
+                                      mode="lines", line=dict(color="firebrick", dash="dash")))
+            fig.add_trace(go.Scatter(x=tabla_sim["Mes"], y=tabla_sim["Meta (T)"], name="Meta (T)",
+                                      mode="lines", line=dict(color="green", dash="dot")))
+            fig.update_layout(title="Evolución del inventario vs. umbrales de la política", xaxis_title="Mes",
+                               yaxis_title="Unidades", height=420)
+            st.plotly_chart(fig, use_container_width=True)
+
+with tab_propio:
     render_seccion_dataset_propio()
 
 st.markdown("---")
