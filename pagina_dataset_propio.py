@@ -19,6 +19,7 @@ import plotly.graph_objects as go
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+from tensorflow.keras.saving import register_keras_serializable
 from sklearn.preprocessing import MinMaxScaler
 from dataclasses import dataclass, field
 
@@ -197,6 +198,22 @@ def preparar_datos(df, config, ventana=30, horizonte=84):
     )
 
 
+@register_keras_serializable(package="motor_generico")
+class SeleccionarPorEntidad(layers.Layer):
+    """
+    Reemplaza la capa Lambda original (tf.gather según entidad_id).
+    Una capa Lambda con función anónima se guarda/recarga de forma
+    frágil en Keras 3 (requiere safe_mode=False y puede perder la
+    referencia a 'tf' al recargarse en un proceso nuevo — justamente
+    lo que pasa cuando el contenedor de Streamlit se reinicia). Una
+    capa propia registrada con @register_keras_serializable se
+    guarda y recarga de forma robusta, sin ese riesgo.
+    """
+    def call(self, inputs):
+        valores, entidad_id = inputs
+        return tf.gather(valores, tf.cast(entidad_id, tf.int32), batch_dims=1)
+
+
 def construir_modelo_generico(ventana, n_variables, n_entidades,
                                unidades_lstm_1=64, unidades_lstm_2=32,
                                unidades_dense_tronco=16, unidades_dense_cabeza=16, dropout=0.2):
@@ -225,10 +242,9 @@ def construir_modelo_generico(ventana, n_variables, n_entidades,
     p90_stack = layers.Concatenate(axis=1)(p90_por_entidad)
     p10_stack = layers.Concatenate(axis=1)(p10_por_entidad)
 
-    seleccionar = lambda t: tf.gather(t[0], tf.cast(t[1], tf.int32), batch_dims=1)
-    salida_p50 = layers.Lambda(seleccionar, output_shape=(1,), name="P50")([p50_stack, entrada_entidad])
-    salida_p90 = layers.Lambda(seleccionar, output_shape=(1,), name="P90")([p90_stack, entrada_entidad])
-    salida_p10 = layers.Lambda(seleccionar, output_shape=(1,), name="P10")([p10_stack, entrada_entidad])
+    salida_p50 = SeleccionarPorEntidad(name="P50")([p50_stack, entrada_entidad])
+    salida_p90 = SeleccionarPorEntidad(name="P90")([p90_stack, entrada_entidad])
+    salida_p10 = SeleccionarPorEntidad(name="P10")([p10_stack, entrada_entidad])
 
     return keras.Model(
         inputs=[entrada_serie, entrada_entidad],
@@ -426,6 +442,49 @@ def pronostico_recursivo(modelo, datos, df_historico, config, entidad, trayector
 
 
 # ============================================================
+# RESUMEN EXPLORATORIO DEL DATASET (rango temporal + estacionalidad)
+# ============================================================
+
+def resumen_temporal_dataset(df, columna_fecha, columna_entidad):
+    fechas = pd.to_datetime(df[columna_fecha])
+    fecha_min, fecha_max = fechas.min(), fechas.max()
+    dias_totales = (fecha_max - fecha_min).days
+    anios_aprox = dias_totales / 365.25
+    n_entidades = df[columna_entidad].nunique() if columna_entidad else 1
+    return {
+        "fecha_min": fecha_min, "fecha_max": fecha_max,
+        "dias_totales": dias_totales, "anios_aprox": anios_aprox,
+        "n_entidades": n_entidades,
+    }
+
+
+def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo):
+    """
+    Promedio mensual de la variable objetivo por entidad, para ver de
+    entrada la estacionalidad del dataset (ej. picos de invierno/verano)
+    antes de entrenar nada.
+    """
+    ds = df.copy()
+    ds[columna_fecha] = pd.to_datetime(ds[columna_fecha])
+    col_ent = columna_entidad
+    if col_ent is None:
+        ds["_entidad_generica"] = "serie_unica"
+        col_ent = "_entidad_generica"
+    ds["_mes"] = ds[columna_fecha].dt.to_period("M").dt.to_timestamp()
+    resumen = ds.groupby([col_ent, "_mes"])[columna_objetivo].mean().reset_index()
+
+    fig = go.Figure()
+    for ent in sorted(resumen[col_ent].astype(str).unique()):
+        sub = resumen[resumen[col_ent].astype(str) == ent]
+        fig.add_trace(go.Scatter(x=sub["_mes"], y=sub[columna_objetivo], name=str(ent), mode="lines+markers"))
+    fig.update_layout(
+        title=f"{columna_objetivo} — promedio mensual por entidad",
+        xaxis_title="Mes", yaxis_title=columna_objetivo, height=420,
+    )
+    return fig
+
+
+# ============================================================
 # POLÍTICA DE INVENTARIO GENÉRICA (ROP / SS / Meta T)
 # ============================================================
 
@@ -515,6 +574,23 @@ def render_seccion_dataset_propio():
         columna_objetivo=columna_objetivo, columnas_exogenas=columnas_exogenas,
     )
 
+    st.subheader("Resumen del dataset")
+    resumen = resumen_temporal_dataset(df, columna_fecha, columna_entidad)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Desde", resumen["fecha_min"].strftime("%Y-%m-%d"))
+    c2.metric("Hasta", resumen["fecha_max"].strftime("%Y-%m-%d"))
+    c3.metric("Años cubiertos (aprox.)", f"{resumen['anios_aprox']:.1f}")
+    c4.metric("Entidades", resumen["n_entidades"])
+
+    fig_resumen = graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
+    st.plotly_chart(fig_resumen, use_container_width=True)
+    st.caption(
+        "Este gráfico muestra el promedio mensual real del dataset, antes de "
+        "entrenar nada — sirve para anticipar qué forma debería tener el "
+        "pronóstico (ej. si esperas un peak en ciertos meses, debería "
+        "notarse acá primero)."
+    )
+
     n_entidades_estimado = df[columna_entidad].nunique() if columna_entidad else 1
     viable, mensaje = estimar_viabilidad(len(df), n_entidades_estimado)
     if not viable:
@@ -584,6 +660,15 @@ def render_seccion_dataset_propio():
     if not config_guardada.columnas_exogenas:
         st.info("Este dataset no tiene variables exógenas seleccionadas, así que no hay ninguna variable que se pueda simular en un escenario de estrés.")
     else:
+        rangos_historicos = {
+            var: (df_guardado[var].min(), df_guardado[var].max())
+            for var in config_guardada.columnas_exogenas
+        }
+        texto_rangos = " · ".join(
+            f"**{var}**: {mn:.1f} a {mx:.1f}" for var, (mn, mx) in rangos_historicos.items()
+        )
+        st.caption(f"Rango histórico real de cada variable (para elegir un % de cambio realista): {texto_rangos}")
+
         with st.form("form_whatif_generico"):
             c1, c2 = st.columns(2)
             entidad_whatif = c1.selectbox("Entidad a simular", options=list(datos.entidad_a_id.keys()), key="entidad_whatif")
@@ -612,13 +697,38 @@ def render_seccion_dataset_propio():
                 pronostico_whatif = pronostico_recursivo(
                     modelo, datos, df_guardado, config_guardada, entidad_whatif, trayectoria
                 )
+
+            # aviso si el escenario empuja la variable fuera del rango que
+            # el modelo vio durante el entrenamiento — fuera de ese rango
+            # el modelo extrapola y su comportamiento deja de ser confiable
+            mask_evento = (trayectoria[config_guardada.columna_fecha] >= fecha_inicio_evento) & (
+                trayectoria[config_guardada.columna_fecha] <= fecha_fin_evento
+            )
+            valores_evento = trayectoria.loc[mask_evento, variable_afectada]
+            hist_min, hist_max = rangos_historicos[variable_afectada]
+            fuera_de_rango = (valores_evento.min() < hist_min) or (valores_evento.max() > hist_max)
+
             st.session_state["motor_generico_whatif"] = {
                 "pronostico": pronostico_whatif, "entidad": entidad_whatif,
                 "fecha_inicio_evento": fecha_inicio_evento, "fecha_fin_evento": fecha_fin_evento,
+                "fuera_de_rango": fuera_de_rango,
+                "rango_evento": (round(valores_evento.min(), 1), round(valores_evento.max(), 1)),
+                "rango_historico": (round(hist_min, 1), round(hist_max, 1)),
             }
 
         whatif_resultado = st.session_state.get("motor_generico_whatif")
         if whatif_resultado is not None:
+            if whatif_resultado["fuera_de_rango"]:
+                rmin, rmax = whatif_resultado["rango_historico"]
+                emin, emax = whatif_resultado["rango_evento"]
+                st.warning(
+                    f"El escenario lleva la variable a un rango de {emin} a {emax}, "
+                    f"por fuera del rango histórico observado ({rmin} a {rmax}). "
+                    "El modelo nunca vio valores así durante el entrenamiento, así que "
+                    "está extrapolando: los resultados en esta zona pueden no ser "
+                    "confiables o comportarse de forma poco intuitiva. Prueba un "
+                    "porcentaje de cambio más moderado para un escenario más realista."
+                )
             pron = whatif_resultado["pronostico"]
             fig_wi = go.Figure()
             fig_wi.add_trace(go.Scatter(x=pron[config_guardada.columna_fecha], y=pron["P90"], line=dict(width=0), showlegend=False))
