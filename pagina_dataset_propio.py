@@ -634,10 +634,10 @@ def render_seccion_dataset_propio():
             graficar_serie_diaria(df, esquema.columna_fecha, esquema.columna_entidad, objetivo_preview),
             use_container_width=True, key="chart_preview_diaria",
         )
-        st.plotly_chart(
-            graficar_serie_mensual(df, esquema.columna_fecha, esquema.columna_entidad, objetivo_preview),
-            use_container_width=True, key="chart_preview_mensual",
-        )
+        # el gráfico mensual NO se repite acá — aparece más abajo, en
+        # "Resumen del dataset", ya con la columna objetivo confirmada
+        # por el usuario (evita mostrar el mismo gráfico dos veces
+        # cuando la detección automática coincide con la elección final)
 
     st.subheader("Confirma las columnas detectadas")
     col1, col2 = st.columns(2)
