@@ -624,21 +624,6 @@ def render_seccion_dataset_propio():
 
     st.markdown(resumen_roles_columnas(df, esquema))
 
-    if esquema.candidatas_objetivo:
-        objetivo_preview = esquema.candidatas_objetivo[0]
-        st.caption(
-            f"Vista previa usando '{objetivo_preview}' como variable de referencia "
-            "(puedes cambiarla más abajo al confirmar las columnas)."
-        )
-        st.plotly_chart(
-            graficar_serie_diaria(df, esquema.columna_fecha, esquema.columna_entidad, objetivo_preview),
-            use_container_width=True, key="chart_preview_diaria",
-        )
-        # el gráfico mensual NO se repite acá — aparece más abajo, en
-        # "Resumen del dataset", ya con la columna objetivo confirmada
-        # por el usuario (evita mostrar el mismo gráfico dos veces
-        # cuando la detección automática coincide con la elección final)
-
     st.subheader("Confirma las columnas detectadas")
     col1, col2 = st.columns(2)
     with col1:
@@ -688,13 +673,15 @@ def render_seccion_dataset_propio():
     c3.metric("Años cubiertos (aprox.)", f"{resumen['anios_aprox']:.1f}")
     c4.metric("Entidades", resumen["n_entidades"])
 
+    fig_diaria = graficar_serie_diaria(df, columna_fecha, columna_entidad, columna_objetivo)
+    st.plotly_chart(fig_diaria, use_container_width=True, key="chart_resumen_diaria")
+
     fig_resumen = graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
     st.plotly_chart(fig_resumen, use_container_width=True, key="chart_resumen_mensual")
     st.caption(
-        "Este gráfico muestra el promedio mensual real del dataset, antes de "
-        "entrenar nada — sirve para anticipar qué forma debería tener el "
-        "pronóstico (ej. si esperas un peak en ciertos meses, debería "
-        "notarse acá primero)."
+        "El gráfico de arriba muestra la demanda día a día, tal cual; el de abajo, "
+        "el promedio mensual — sirve para anticipar qué forma debería tener el "
+        "pronóstico (ej. si esperas un peak en ciertos meses, debería notarse acá primero)."
     )
 
     n_entidades_estimado = df[columna_entidad].nunique() if columna_entidad else 1
