@@ -104,9 +104,13 @@ def detectar_esquema(df):
 
     excluidas = {col_fecha, col_entidad}
     candidatas_objetivo = [c for c in df.columns if c not in excluidas and _es_numerica_continua(df[c])]
+    # solo columnas numéricas: el motor todavía no soporta variables
+    # exógenas de texto/categóricas (ej. 'insumo_critico' con valores
+    # como 'proteina de arveja'), que requerirían one-hot encoding —
+    # queda como trabajo futuro
     candidatas_exogenas = [
         c for c in df.columns
-        if c not in excluidas and (pd.api.types.is_numeric_dtype(df[c]) or df[c].nunique() <= 50)
+        if c not in excluidas and pd.api.types.is_numeric_dtype(df[c])
     ]
 
     return EsquemaDetectado(
@@ -145,6 +149,18 @@ def preparar_datos(df, config, ventana=30, horizonte=84):
     ds = df.copy()
     ds[config.columna_fecha] = pd.to_datetime(ds[config.columna_fecha])
     variables = [config.columna_objetivo] + list(config.columnas_exogenas)
+
+    # validación explícita: todas las variables (objetivo + exógenas)
+    # tienen que ser numéricas — si alguna es de texto, se avisa con un
+    # mensaje claro en vez de fallar con un error críptico de conversión
+    no_numericas = [v for v in variables if not pd.api.types.is_numeric_dtype(ds[v])]
+    if no_numericas:
+        raise ValueError(
+            f"Las siguientes columnas no son numéricas y no se pueden usar como objetivo "
+            f"ni como variable exógena todavía: {', '.join(no_numericas)}. "
+            "El motor por ahora solo soporta variables numéricas (categóricas como texto "
+            "requerirían codificación adicional, no implementada)."
+        )
 
     if config.columna_entidad is None:
         ds["_entidad_generica"] = "serie_unica"
@@ -456,6 +472,31 @@ def pronostico_recursivo(modelo, datos, df_historico, config, entidad, trayector
 # RESUMEN EXPLORATORIO DEL DATASET (rango temporal + estacionalidad)
 # ============================================================
 
+def resumen_roles_columnas(df, esquema):
+    """
+    Checklist de qué rol cumple cada tipo de columna importante para el
+    motor (fecha, entidad, variable a pronosticar, exógenas), marcando
+    'No detectada' cuando el dataset no trae esa información. No asume
+    nombres de negocio específicos (precio, demanda, etc.) — se basa en
+    los roles genéricos que el motor realmente necesita para funcionar.
+    """
+    lineas = []
+    lineas.append(f"- **Fecha**: {esquema.columna_fecha if esquema.columna_fecha else 'No detectada'}")
+    lineas.append(
+        f"- **Entidad (SKU/tienda/producto)**: "
+        f"{esquema.columna_entidad if esquema.columna_entidad else 'No detectada — se tratará como una sola serie'}"
+    )
+    if esquema.candidatas_objetivo:
+        lineas.append(f"- **Variable a pronosticar (candidatas)**: {', '.join(esquema.candidatas_objetivo)}")
+    else:
+        lineas.append("- **Variable a pronosticar**: No detectada — no hay ninguna columna numérica que se pueda usar como objetivo")
+    if esquema.candidatas_exogenas:
+        lineas.append(f"- **Variables exógenas (factores que podrían influir)**: {', '.join(esquema.candidatas_exogenas)}")
+    else:
+        lineas.append("- **Variables exógenas**: No detectadas")
+    return "\n".join(lineas)
+
+
 def resumen_temporal_dataset(df, columna_fecha, columna_entidad):
     fechas = pd.to_datetime(df[columna_fecha])
     fecha_min, fecha_max = fechas.min(), fechas.max()
@@ -491,6 +532,30 @@ def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
     fig.update_layout(
         title=f"{columna_objetivo} — promedio mensual por entidad",
         xaxis_title="Mes", yaxis_title=columna_objetivo, height=420,
+    )
+    return fig
+
+
+def graficar_serie_diaria(df, columna_fecha, columna_entidad, columna_objetivo):
+    """
+    Serie diaria sin agregar, por entidad — el dato tal cual, día a día,
+    antes de cualquier promedio.
+    """
+    ds = df.copy()
+    ds[columna_fecha] = pd.to_datetime(ds[columna_fecha])
+    col_ent = columna_entidad
+    if col_ent is None:
+        ds["_entidad_generica"] = "serie_unica"
+        col_ent = "_entidad_generica"
+    ds = ds.sort_values([col_ent, columna_fecha])
+
+    fig = go.Figure()
+    for ent in sorted(ds[col_ent].astype(str).unique()):
+        sub = ds[ds[col_ent].astype(str) == ent]
+        fig.add_trace(go.Scatter(x=sub[columna_fecha], y=sub[columna_objetivo], name=str(ent), mode="lines"))
+    fig.update_layout(
+        title=f"{columna_objetivo} — demanda diaria por entidad",
+        xaxis_title="Fecha", yaxis_title=columna_objetivo, height=380,
     )
     return fig
 
@@ -557,6 +622,23 @@ def render_seccion_dataset_propio():
     for adv in esquema.advertencias:
         st.warning(adv)
 
+    st.markdown(resumen_roles_columnas(df, esquema))
+
+    if esquema.candidatas_objetivo:
+        objetivo_preview = esquema.candidatas_objetivo[0]
+        st.caption(
+            f"Vista previa usando '{objetivo_preview}' como variable de referencia "
+            "(puedes cambiarla más abajo al confirmar las columnas)."
+        )
+        st.plotly_chart(
+            graficar_serie_diaria(df, esquema.columna_fecha, esquema.columna_entidad, objetivo_preview),
+            use_container_width=True, key="chart_preview_diaria",
+        )
+        st.plotly_chart(
+            graficar_serie_mensual(df, esquema.columna_fecha, esquema.columna_entidad, objetivo_preview),
+            use_container_width=True, key="chart_preview_mensual",
+        )
+
     st.subheader("Confirma las columnas detectadas")
     col1, col2 = st.columns(2)
     with col1:
@@ -580,6 +662,19 @@ def render_seccion_dataset_propio():
     with col4:
         horizonte = st.number_input("Horizonte (días a pronosticar / dejar para test)", min_value=7, max_value=180, value=30)
 
+    if columna_entidad:
+        filas_por_entidad_min = df.groupby(columna_entidad).size().min()
+    else:
+        filas_por_entidad_min = len(df)
+    if horizonte > filas_por_entidad_min * 0.35:
+        st.warning(
+            f"El horizonte que elegiste ({horizonte} días) es una porción grande del historial "
+            f"disponible por entidad (la entidad con menos datos tiene {filas_por_entidad_min} filas). "
+            "Un horizonte muy grande le deja poco margen de entrenamiento al modelo, y puede hacer que "
+            "las predicciones se aplanen (que casi no varíen día a día) en vez de seguir el patrón real. "
+            f"Se recomienda un horizonte de hasta ~{int(filas_por_entidad_min * 0.35)} días para este dataset."
+        )
+
     config = ConfiguracionColumnas(
         columna_fecha=columna_fecha, columna_entidad=columna_entidad,
         columna_objetivo=columna_objetivo, columnas_exogenas=columnas_exogenas,
@@ -594,7 +689,7 @@ def render_seccion_dataset_propio():
     c4.metric("Entidades", resumen["n_entidades"])
 
     fig_resumen = graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
-    st.plotly_chart(fig_resumen, use_container_width=True)
+    st.plotly_chart(fig_resumen, use_container_width=True, key="chart_resumen_mensual")
     st.caption(
         "Este gráfico muestra el promedio mensual real del dataset, antes de "
         "entrenar nada — sirve para anticipar qué forma debería tener el "
@@ -667,7 +762,7 @@ def render_seccion_dataset_propio():
         title=f"Validación sobre datos históricos (no es pronóstico a futuro) — {entidad_graficar}",
         xaxis_title="Días del período de prueba", yaxis_title="Valor",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="chart_validacion")
 
     modelo = st.session_state["motor_generico_modelo"]
     datos = st.session_state["motor_generico_datos"]
@@ -830,10 +925,6 @@ def render_seccion_dataset_propio():
                 fill="tonexty", fillcolor="rgba(70,130,180,0.3)", name="Rango P10–P90 (con evento)",
             ))
             fig_wi.add_trace(go.Scatter(x=pron[config_guardada.columna_fecha], y=pron["P50"], name="Con evento (P50)", line=dict(color="red", width=2)))
-            fig_wi.add_trace(go.Scatter(
-                x=pron_base[config_guardada.columna_fecha], y=pron_base["P50"], name="Sin evento (línea base)",
-                line=dict(color="gray", width=2, dash="dot"),
-            ))
             fig_wi.add_vrect(
                 x0=whatif_resultado["fecha_inicio_evento"], x1=whatif_resultado["fecha_fin_evento"],
                 fillcolor="orange", opacity=0.15, annotation_text="Evento", line_width=0,
@@ -842,13 +933,11 @@ def render_seccion_dataset_propio():
                 title=f"Pronóstico bajo el escenario — {whatif_resultado['entidad']}",
                 xaxis_title="Fecha", yaxis_title=config_guardada.columna_objetivo, height=420,
             )
-            st.plotly_chart(fig_wi, use_container_width=True)
+            st.plotly_chart(fig_wi, use_container_width=True, key="chart_whatif")
             st.caption(
-                f"Diferencia promedio durante el evento (con evento − sin evento): "
+                f"Diferencia promedio durante el evento, respecto a un escenario sin el evento: "
                 f"{whatif_resultado['diferencia_promedio']:+.2f} {config_guardada.columna_objetivo}/día. "
-                "La línea blanca es historial real; desde ahí en adelante todo es pronóstico. "
-                "La línea gris punteada muestra qué habría pronosticado el modelo sin el evento, "
-                "para que el efecto real se distinga de la estacionalidad normal del negocio."
+                "La línea blanca es historial real; desde ahí en adelante todo es pronóstico."
             )
 
     # ============================================================
