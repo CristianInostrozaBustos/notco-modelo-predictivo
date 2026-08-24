@@ -646,6 +646,19 @@ def render_seccion_dataset_propio():
     with col4:
         horizonte = st.number_input("Horizonte (días a pronosticar / dejar para test)", min_value=7, max_value=180, value=30)
 
+    if columna_entidad:
+        filas_por_entidad_min = df.groupby(columna_entidad).size().min()
+    else:
+        filas_por_entidad_min = len(df)
+    if horizonte > filas_por_entidad_min * 0.35:
+        st.warning(
+            f"El horizonte que elegiste ({horizonte} días) es una porción grande del historial "
+            f"disponible por entidad (la entidad con menos datos tiene {filas_por_entidad_min} filas). "
+            "Un horizonte muy grande le deja poco margen de entrenamiento al modelo, y puede hacer que "
+            "las predicciones se aplanen (que casi no varíen día a día) en vez de seguir el patrón real. "
+            f"Se recomienda un horizonte de hasta ~{int(filas_por_entidad_min * 0.35)} días para este dataset."
+        )
+
     config = ConfiguracionColumnas(
         columna_fecha=columna_fecha, columna_entidad=columna_entidad,
         columna_objetivo=columna_objetivo, columnas_exogenas=columnas_exogenas,
