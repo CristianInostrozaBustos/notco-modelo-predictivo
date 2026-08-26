@@ -964,23 +964,31 @@ def render_seccion_dataset_propio():
             mask_evento = (pron[config_guardada.columna_fecha] >= whatif_activo["fecha_inicio_evento"]) & (
                 pron[config_guardada.columna_fecha] <= whatif_activo["fecha_fin_evento"]
             )
-            # durante el evento, el modelo no tiene demanda "real" (es pronóstico a futuro),
-            # así que d̄ se toma del P50 pronosticado, y σ se deriva del propio ancho de la
-            # banda P10-P90 del modelo (P90-P50)/Z, consistente con la fórmula de la sección 8.4
+            # d̄ se toma del P50 pronosticado por el escenario, así que la
+            # demanda promedio SÍ refleja el escenario simulado.
+            #
+            # σ, en cambio, se mantiene anclado a la variabilidad histórica
+            # real (misma fuente que usa el escenario "sin what-if"), en vez
+            # de derivarse de la banda P10-P90 del propio pronóstico
+            # recursivo. Un pronóstico recursivo (que se retroalimenta de
+            # sus propias predicciones día a día) tiende a mostrarse más
+            # confiado de lo que realmente es a medida que se aleja en el
+            # horizonte, subestimando su propia incertidumbre — usar esa
+            # banda como sigma podría hacer bajar el Stock de Seguridad
+            # incluso cuando la demanda esperada sube, algo poco intuitivo
+            # y poco conservador para una decisión de abastecimiento.
             p50_evento = pron.loc[mask_evento, "P50"]
-            p90_evento = pron.loc[mask_evento, "P90"]
-            z_temp = Z_POR_NIVEL_SERVICIO[nivel_servicio]
-            sigma_evento = ((p90_evento - p50_evento) / z_temp).mean()
+            pred_ent_politica_base = resultado["predicciones"][entidad_politica]
             pred_ent_politica = {
                 "P50": p50_evento.values,
-                "real": None,  # no se usa cuando se pasa sigma_override
+                "real": pred_ent_politica_base["real"],  # sigma histórico, no el del pronóstico recursivo
             }
-            politica = calcular_politica_inventario(
-                pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision, sigma_override=sigma_evento,
-            )
+            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
             st.info(
-                "Política calculada usando la demanda proyectada por el escenario what-if "
-                "durante la ventana del evento, no la demanda histórica de validación."
+                "Política calculada con la demanda proyectada por el escenario what-if, "
+                "manteniendo la variabilidad histórica real para el Stock de Seguridad "
+                "(el pronóstico recursivo tiende a subestimar su propia incertidumbre "
+                "mientras más lejos predice, así que no se usa como fuente de σ)."
             )
         else:
             pred_ent_politica = resultado["predicciones"][entidad_politica]
