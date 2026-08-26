@@ -984,12 +984,7 @@ def render_seccion_dataset_propio():
                 "real": pred_ent_politica_base["real"],  # sigma histórico, no el del pronóstico recursivo
             }
             politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
-            st.info(
-                "Política calculada con la demanda proyectada por el escenario what-if, "
-                "manteniendo la variabilidad histórica real para el Stock de Seguridad "
-                "(el pronóstico recursivo tiende a subestimar su propia incertidumbre "
-                "mientras más lejos predice, así que no se usa como fuente de σ)."
-            )
+            st.info("Política calculada con la demanda proyectada por el escenario what-if.")
         else:
             pred_ent_politica = resultado["predicciones"][entidad_politica]
             politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
