@@ -569,7 +569,7 @@ Z_POR_NIVEL_SERVICIO = {
 }
 
 
-def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias):
+def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias, sigma_override=None):
     """
     Replica las fórmulas ya validadas en la tesis (sección 8.4):
     ROP = d̄·LT + SS ; SS = Z·σ·√LT ; T = d̄·(LT+P) + SS
@@ -577,9 +577,14 @@ def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_ser
     calculadas para la entidad (mismo set de test usado en la
     validación), sin necesidad de una columna de lead time real —
     el usuario declara el lead time como supuesto.
+
+    Si se pasa sigma_override (ej. derivado del ancho de banda P10-P90
+    de un escenario what-if, donde no existe demanda "real" observada
+    porque es un pronóstico a futuro), se usa ese valor de sigma en vez
+    de calcularlo desde predicciones_entidad["real"].
     """
     d_prom = float(np.mean(predicciones_entidad["P50"]))
-    sigma = float(np.std(predicciones_entidad["real"]))
+    sigma = float(sigma_override) if sigma_override is not None else float(np.std(predicciones_entidad["real"]))
     z = Z_POR_NIVEL_SERVICIO[nivel_servicio]
 
     ss = z * sigma * np.sqrt(lead_time_dias)
@@ -943,9 +948,43 @@ def render_seccion_dataset_propio():
     nivel_servicio = c2.selectbox("Nivel de servicio deseado", options=list(Z_POR_NIVEL_SERVICIO.keys()), index=2)
     periodo_revision = c3.number_input("Período entre revisiones — P (días)", min_value=1, max_value=90, value=30)
 
+    whatif_activo = st.session_state.get("motor_generico_whatif")
+    usar_whatif = False
+    if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
+        usar_whatif = st.checkbox(
+            f"Usar la demanda del escenario what-if simulado (evento del "
+            f"{whatif_activo['fecha_inicio_evento'].strftime('%Y-%m-%d')} al "
+            f"{whatif_activo['fecha_fin_evento'].strftime('%Y-%m-%d')}), en vez de la demanda histórica",
+            value=True,
+        )
+
     if st.button("Calcular política"):
-        pred_ent_politica = resultado["predicciones"][entidad_politica]
-        politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
+        if usar_whatif:
+            pron = whatif_activo["pronostico"]
+            mask_evento = (pron[config_guardada.columna_fecha] >= whatif_activo["fecha_inicio_evento"]) & (
+                pron[config_guardada.columna_fecha] <= whatif_activo["fecha_fin_evento"]
+            )
+            # durante el evento, el modelo no tiene demanda "real" (es pronóstico a futuro),
+            # así que d̄ se toma del P50 pronosticado, y σ se deriva del propio ancho de la
+            # banda P10-P90 del modelo (P90-P50)/Z, consistente con la fórmula de la sección 8.4
+            p50_evento = pron.loc[mask_evento, "P50"]
+            p90_evento = pron.loc[mask_evento, "P90"]
+            z_temp = Z_POR_NIVEL_SERVICIO[nivel_servicio]
+            sigma_evento = ((p90_evento - p50_evento) / z_temp).mean()
+            pred_ent_politica = {
+                "P50": p50_evento.values,
+                "real": None,  # no se usa cuando se pasa sigma_override
+            }
+            politica = calcular_politica_inventario(
+                pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision, sigma_override=sigma_evento,
+            )
+            st.info(
+                "Política calculada usando la demanda proyectada por el escenario what-if "
+                "durante la ventana del evento, no la demanda histórica de validación."
+            )
+        else:
+            pred_ent_politica = resultado["predicciones"][entidad_politica]
+            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Punto de Reorden (ROP)", f"{politica['ROP']:,}")
