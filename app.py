@@ -1,14 +1,3 @@
-"""
-Sitio de visualización y cálculo de métricas — Modelo predictivo NotCo
-Proyecto de título: Propuesta de un modelo predictivo para la optimización de
-inventarios y abastecimiento en la industria alimentaria plant-based en NotCo.
-
-Ejecutar con:  streamlit run app.py
-Requiere en la misma carpeta:
-  - dataset_notco_5sku_5anos.csv
-  - modelo_global.keras
-"""
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -20,9 +9,6 @@ from tensorflow.keras import layers
 from sklearn.preprocessing import MinMaxScaler
 from pagina_dataset_propio import render_seccion_dataset_propio
 
-# ============================================================
-# CONFIGURACIÓN GENERAL
-# ============================================================
 st.set_page_config(page_title="NotCo — Modelo Predictivo", page_icon="📦", layout="wide")
 
 VARIABLES = ["demanda_unidades", "promocion", "indice_estres_insumos", "precio_clp"]
@@ -41,9 +27,6 @@ DATASET_PATH = "dataset_notco_5sku_5anos.csv"
 MODELO_PATH = "modelo_global.keras"
 
 
-# ============================================================
-# CARGA DE DATOS Y MODELO (cacheado, se ejecuta una sola vez)
-# ============================================================
 @st.cache_data
 def cargar_dataset():
     ds = pd.read_csv(DATASET_PATH)
@@ -171,9 +154,6 @@ def predecir_dia(model, ventana, sku_id, scaler, sku):
     return p10, p50, p90
 
 
-# ============================================================
-# CARGA INICIAL
-# ============================================================
 ds = cargar_dataset()
 skus_lista = sorted(ds["sku"].unique())
 sku_a_id = {s: i for i, s in enumerate(skus_lista)}
@@ -182,9 +162,6 @@ model_global = cargar_modelo(len(skus_lista))
 validacion = calcular_validacion(ds, model_global, scalers_por_sku, skus_lista, sku_a_id)
 
 
-# ============================================================
-# NAVEGACIÓN PRINCIPAL (estilo pestañas)
-# ============================================================
 vista = st.radio(
     "Vista", ["NotCo", "Sube tu propio dataset"],
     horizontal=True, label_visibility="collapsed",
@@ -192,9 +169,6 @@ vista = st.radio(
 st.markdown("---")
 
 if vista == "NotCo":
-    # ============================================================
-    # SIDEBAR
-    # ============================================================
     st.sidebar.title("Modelo Predictivo")
     st.sidebar.markdown("Modelo LSTM global multi-SKU (tronco compartido + cabeza independiente por producto)")
     sku_sel = st.sidebar.selectbox("Selecciona un SKU", skus_lista, index=skus_lista.index("NotHotDog") if "NotHotDog" in skus_lista else 0)
@@ -228,9 +202,6 @@ if vista == "NotCo":
 
     st.title(f"{sku_sel}")
 
-    # ============================================================
-    # SECCIÓN 1 — PRONÓSTICO + ROP/SS
-    # ============================================================
     if seccion.startswith("1"):
         st.header("Validación del modelo y política de inventario")
 
@@ -265,9 +236,6 @@ if vista == "NotCo":
         c2.metric("Stock de seguridad (SS)", f"{ss:,} u.")
         c3.metric("ROP diario (alarma)", f"{rop_diario:,} u.")
 
-    # ============================================================
-    # SECCIÓN 2 — ESCENARIO WHAT-IF
-    # ============================================================
     elif seccion.startswith("2"):
         st.header(f"Escenario what-if: estrés de abastecimiento — {insumo_nombre} ({proc_primaria})")
         st.caption("Simula un evento de estrés (ej. sequía, disrupción logística) en el proveedor primario del insumo crítico de este SKU.")
@@ -396,9 +364,6 @@ if vista == "NotCo":
                                      "Ahorro cambiando de proveedor": f"${costo_primario - costo_secundario:,.0f}"})
             st.dataframe(pd.DataFrame(tabla_costo), use_container_width=True, hide_index=True)
 
-    # ============================================================
-    # SECCIÓN 3 — SIMULACIÓN DE INVENTARIO (política híbrida)
-    # ============================================================
     elif seccion.startswith("3"):
         st.header("Simulación de la política de inventario")
         st.caption("Sistema híbrido: revisión periódica mensual (nivel meta) + monitoreo diario con gatillo de compra de emergencia.")
