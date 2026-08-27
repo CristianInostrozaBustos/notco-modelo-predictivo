@@ -569,7 +569,7 @@ Z_POR_NIVEL_SERVICIO = {
 }
 
 
-def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias, sigma_override=None):
+def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias):
     """
     Replica las fórmulas ya validadas en la tesis (sección 8.4):
     ROP = d̄·LT + SS ; SS = Z·σ·√LT ; T = d̄·(LT+P) + SS
@@ -577,14 +577,9 @@ def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_ser
     calculadas para la entidad (mismo set de test usado en la
     validación), sin necesidad de una columna de lead time real —
     el usuario declara el lead time como supuesto.
-
-    Si se pasa sigma_override (ej. derivado del ancho de banda P10-P90
-    de un escenario what-if, donde no existe demanda "real" observada
-    porque es un pronóstico a futuro), se usa ese valor de sigma en vez
-    de calcularlo desde predicciones_entidad["real"].
     """
     d_prom = float(np.mean(predicciones_entidad["P50"]))
-    sigma = float(sigma_override) if sigma_override is not None else float(np.std(predicciones_entidad["real"]))
+    sigma = float(np.std(predicciones_entidad["real"]))
     z = Z_POR_NIVEL_SERVICIO[nivel_servicio]
 
     ss = z * sigma * np.sqrt(lead_time_dias)
@@ -948,69 +943,9 @@ def render_seccion_dataset_propio():
     nivel_servicio = c2.selectbox("Nivel de servicio deseado", options=list(Z_POR_NIVEL_SERVICIO.keys()), index=2)
     periodo_revision = c3.number_input("Período entre revisiones — P (días)", min_value=1, max_value=90, value=30)
 
-    whatif_activo = st.session_state.get("motor_generico_whatif")
-    usar_whatif = False
-    if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
-        usar_whatif = st.checkbox(
-            f"Usar la demanda del escenario what-if simulado (evento del "
-            f"{whatif_activo['fecha_inicio_evento'].strftime('%Y-%m-%d')} al "
-            f"{whatif_activo['fecha_fin_evento'].strftime('%Y-%m-%d')}), en vez de la demanda histórica",
-            value=True,
-        )
-
     if st.button("Calcular política"):
-        if usar_whatif:
-            pron = whatif_activo["pronostico"]
-            mask_evento = (pron[config_guardada.columna_fecha] >= whatif_activo["fecha_inicio_evento"]) & (
-                pron[config_guardada.columna_fecha] <= whatif_activo["fecha_fin_evento"]
-            )
-            # d̄ se toma del P50 pronosticado por el escenario, así que la
-            # demanda promedio SÍ refleja el escenario simulado.
-            #
-            # σ, en cambio, se mantiene anclado a la variabilidad histórica
-            # real (misma fuente que usa el escenario "sin what-if"), en vez
-            # de derivarse de la banda P10-P90 del propio pronóstico
-            # recursivo. Un pronóstico recursivo (que se retroalimenta de
-            # sus propias predicciones día a día) tiende a mostrarse más
-            # confiado de lo que realmente es a medida que se aleja en el
-            # horizonte, subestimando su propia incertidumbre — usar esa
-            # banda como sigma podría hacer bajar el Stock de Seguridad
-            # incluso cuando la demanda esperada sube, algo poco intuitivo
-            # y poco conservador para una decisión de abastecimiento.
-            p50_evento = pron.loc[mask_evento, "P50"]
-            pred_ent_politica_base = resultado["predicciones"][entidad_politica]
-            pred_ent_politica = {
-                "P50": p50_evento.values,
-                "real": pred_ent_politica_base["real"],  # sigma histórico, no el del pronóstico recursivo
-            }
-            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
-            st.info("Política calculada con la demanda proyectada por el escenario what-if.")
-        else:
-            # FIX: antes esta rama comparaba contra el set de validación
-            # histórico del modelo (resultado["predicciones"]), un período
-            # de tiempo distinto al del pronóstico futuro usado en la rama
-            # "con what-if". Como la demanda tiene tendencia creciente, esa
-            # comparación hacía que el ROP subiera al activar el evento
-            # aunque el evento redujera la demanda, porque en realidad se
-            # estaban comparando dos ventanas temporales distintas, no el
-            # mismo horizonte con y sin el evento.
-            #
-            # Ahora, si hay un escenario what-if calculado para esta misma
-            # entidad, se usa pronostico_base (el mismo horizonte futuro,
-            # generado con cambio_pct=0.0) como el escenario "sin evento",
-            # para que la comparación con/sin evento sea sobre la misma
-            # ventana de tiempo. Si no hay what-if calculado, se mantiene
-            # el comportamiento original (set de validación histórico).
-            if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
-                pron_base = whatif_activo["pronostico_base"]
-                pred_ent_politica_hist = resultado["predicciones"][entidad_politica]
-                pred_ent_politica = {
-                    "P50": pron_base["P50"].values,
-                    "real": pred_ent_politica_hist["real"],  # sigma histórico, igual que en la rama con evento
-                }
-            else:
-                pred_ent_politica = resultado["predicciones"][entidad_politica]
-            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
+        pred_ent_politica = resultado["predicciones"][entidad_politica]
+        politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Punto de Reorden (ROP)", f"{politica['ROP']:,}")
