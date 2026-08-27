@@ -986,7 +986,30 @@ def render_seccion_dataset_propio():
             politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
             st.info("Política calculada con la demanda proyectada por el escenario what-if.")
         else:
-            pred_ent_politica = resultado["predicciones"][entidad_politica]
+            # FIX: antes esta rama comparaba contra el set de validación
+            # histórico del modelo (resultado["predicciones"]), un período
+            # de tiempo distinto al del pronóstico futuro usado en la rama
+            # "con what-if". Como la demanda tiene tendencia creciente, esa
+            # comparación hacía que el ROP subiera al activar el evento
+            # aunque el evento redujera la demanda, porque en realidad se
+            # estaban comparando dos ventanas temporales distintas, no el
+            # mismo horizonte con y sin el evento.
+            #
+            # Ahora, si hay un escenario what-if calculado para esta misma
+            # entidad, se usa pronostico_base (el mismo horizonte futuro,
+            # generado con cambio_pct=0.0) como el escenario "sin evento",
+            # para que la comparación con/sin evento sea sobre la misma
+            # ventana de tiempo. Si no hay what-if calculado, se mantiene
+            # el comportamiento original (set de validación histórico).
+            if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
+                pron_base = whatif_activo["pronostico_base"]
+                pred_ent_politica_hist = resultado["predicciones"][entidad_politica]
+                pred_ent_politica = {
+                    "P50": pron_base["P50"].values,
+                    "real": pred_ent_politica_hist["real"],  # sigma histórico, igual que en la rama con evento
+                }
+            else:
+                pred_ent_politica = resultado["predicciones"][entidad_politica]
             politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
 
         c1, c2, c3 = st.columns(3)
