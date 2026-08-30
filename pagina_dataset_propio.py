@@ -849,12 +849,13 @@ def render_seccion_dataset_propio():
                 pron[config_guardada.columna_fecha] <= whatif_activo["fecha_fin_evento"]
             )
             p50_evento = pron.loc[mask_evento, "P50"]
-            pred_ent_politica_base = resultado["predicciones"][entidad_politica]
-            pred_ent_politica = {
-                "P50": p50_evento.values,
-                "real": pred_ent_politica_base["real"],
-            }
-            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
+            p90_evento = pron.loc[mask_evento, "P90"]
+            z_90 = Z_POR_NIVEL_SERVICIO["90%"]
+            sigma_evento = max(0.0, float(np.mean(p90_evento - p50_evento)) / z_90)
+            pred_ent_politica = {"P50": p50_evento.values}
+            politica = calcular_politica_inventario(
+                pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision, sigma_override=sigma_evento,
+            )
             st.info("Política calculada con la demanda proyectada por el escenario what-if.")
         else:
             if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
