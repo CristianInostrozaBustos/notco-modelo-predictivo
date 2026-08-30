@@ -698,7 +698,7 @@ def render_seccion_dataset_propio():
     config_guardada = st.session_state["motor_generico_config"]
 
     st.divider()
-    st.markdown("## 🔮 Escenario what-if")
+    st.subheader("Escenario what-if")
     st.caption("Simula un evento futuro y proyecta la demanda y la política de inventario bajo ese escenario, comparada contra un escenario sin el evento.")
 
     contenedor_whatif = st.container(border=True)
@@ -863,6 +863,7 @@ def render_seccion_dataset_propio():
 
                 st.subheader("Política de inventario proyectada")
                 entidad_pol_wi = whatif_resultado["entidad"]
+                con_evento_wi = st.checkbox("Con evento (desmarca para ver sin evento)", value=True, key="chk_con_evento_wi")
                 c1, c2, c3 = st.columns(3)
                 lead_time_wi = c1.number_input("Lead time asumido (días)", min_value=1, max_value=365, value=30, key="lt_wi")
                 nivel_servicio_wi = c2.selectbox(
@@ -873,26 +874,21 @@ def render_seccion_dataset_propio():
                 )
 
                 if st.button("Calcular política proyectada"):
-                    pred_con_evento = {
-                        "P50": pron.loc[mask_dias_evento_pron_actual, "P50"].values,
-                        "P90": pron.loc[mask_dias_evento_pron_actual, "P90"].values,
+                    pron_usado = pron if con_evento_wi else pron_base
+                    pred_politica_wi = {
+                        "P50": pron_usado.loc[mask_dias_evento_pron_actual, "P50"].values,
+                        "P90": pron_usado.loc[mask_dias_evento_pron_actual, "P90"].values,
                     }
-                    pred_sin_evento = {
-                        "P50": pron_base.loc[mask_dias_evento_pron_actual, "P50"].values,
-                        "P90": pron_base.loc[mask_dias_evento_pron_actual, "P90"].values,
-                    }
-                    politica_con = calcular_politica_inventario(pred_con_evento, lead_time_wi, nivel_servicio_wi, periodo_revision_wi)
-                    politica_sin = calcular_politica_inventario(pred_sin_evento, lead_time_wi, nivel_servicio_wi, periodo_revision_wi)
+                    politica_wi = calcular_politica_inventario(pred_politica_wi, lead_time_wi, nivel_servicio_wi, periodo_revision_wi)
 
-                    col_con, col_sin = st.columns(2)
-                    with col_con:
-                        st.markdown(f"**Con evento** — {entidad_pol_wi}")
-                        st.metric("Punto de Reorden (ROP)", f"{politica_con['ROP']:,}")
-                        st.metric("Stock de Seguridad (SS)", f"{politica_con['SS']:,}")
-                        st.metric("Meta de inventario (T)", f"{politica_con['Meta_T']:,}")
-                    with col_sin:
-                        st.markdown(f"**Sin evento** — {entidad_pol_wi}")
-                        st.metric("Punto de Reorden (ROP)", f"{politica_sin['ROP']:,}")
-                        st.metric("Stock de Seguridad (SS)", f"{politica_sin['SS']:,}")
-                        st.metric("Meta de inventario (T)", f"{politica_sin['Meta_T']:,}")
+                    etiqueta = "Con evento" if con_evento_wi else "Sin evento"
+                    st.markdown(f"**{etiqueta}** — {entidad_pol_wi}")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Punto de Reorden (ROP)", f"{politica_wi['ROP']:,}")
+                    c2.metric("Stock de Seguridad (SS)", f"{politica_wi['SS']:,}")
+                    c3.metric("Meta de inventario (T)", f"{politica_wi['Meta_T']:,}")
+                    st.caption(
+                        f"Demanda promedio proyectada: {politica_wi['demanda_promedio']:,} · "
+                        f"Desviación estándar (P90-P50): {politica_wi['sigma_demanda']:,} · Z: {politica_wi['Z']}"
+                    )
 
