@@ -9,14 +9,14 @@ from tensorflow.keras import layers
 from sklearn.preprocessing import MinMaxScaler
 from pagina_dataset_propio import render_seccion_dataset_propio
 
-st.set_page_config(page_title="NotCo — Modelo Predictivo", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Modelo Predictivo", page_icon="favicon.png", layout="wide")
 
 VARIABLES = ["demanda_unidades", "promocion", "indice_estres_insumos", "precio_clp"]
 VENTANA = 30
 HORIZONTE = 84
 SEMILLA = 42
-Z = 1.28          # Nivel de servicio ~90%
-P_REVISION = 30   # días entre revisiones (política de revisión periódica)
+Z = 1.28
+P_REVISION = 30
 
 COLORS = {
     "NotMilk": "#1f77b4", "NotBurger": "#d62728", "NotMayo": "#2ca02c",
@@ -101,14 +101,11 @@ def desescalar_sku(pred_esc, sku, scalers):
 
 @st.cache_data
 def calcular_validacion(_ds, _model, _scalers, skus_lista, sku_a_id):
-    """Reconstruye las secuencias de test (últimos HORIZONTE días de cada SKU)
-    y obtiene P10/P50/P90 reales vs. predichos — igual que el Bloque 1 del notebook."""
     filas = []
     for sku in skus_lista:
         datos_sku = _ds[_ds["sku"] == sku].reset_index(drop=True)
         datos_esc = _scalers[sku].transform(datos_sku[VARIABLES].values.astype("float32"))
 
-        # Construir las HORIZONTE secuencias de test (ventanas de 30 días → día siguiente)
         n = len(datos_esc)
         inicio_test = n - HORIZONTE
         X_test, y_test_real, fechas_test = [], [], []
@@ -139,7 +136,6 @@ def calcular_meta_periodico(demanda, sigma, lead_time, p, z):
 
 
 def calcular_rop_diario(demanda, sigma, lead_time, z):
-    """ROP clásico (revisión continua, sin +P) — actúa como umbral de alarma diaria."""
     ss = z * sigma * np.sqrt(lead_time)
     rop = demanda * lead_time + ss
     return round(rop), round(ss)
@@ -383,9 +379,6 @@ if vista == "NotCo":
             meses = sorted(pronostico_evento["fecha"].dt.to_period("M").unique())
 
             def simular():
-                """Simula la política híbrida (mensual + monitoreo diario) sobre el escenario
-                ejecutado en la sección 2. La demanda de cada mes viene del pronóstico del
-                modelo bajo ese escenario (no un promedio histórico)."""
                 inventario = inventario_inicial
                 filas = []
                 emergencias = 0
