@@ -1,3 +1,15 @@
+"""
+Sección 4 del sitio — "Sube tu propio dataset".
+
+Conecta los módulos genéricos ya validados (detección de esquema,
+preparación, arquitectura, entrenamiento con caché, what-if) a una
+interfaz Streamlit, sin tocar ni depender de la lógica específica de
+NotCo que ya usan las secciones 1-3.
+
+Se importa y se llama desde app.py cuando la sección seleccionada
+empieza con "4".
+"""
+
 import os
 import hashlib
 import numpy as np
@@ -10,6 +22,13 @@ from tensorflow.keras import layers
 from tensorflow.keras.saving import register_keras_serializable
 from sklearn.preprocessing import MinMaxScaler
 from dataclasses import dataclass, field
+
+
+# ============================================================
+# MÓDULOS GENÉRICOS (schema_detector + pipeline_preparacion +
+# arquitectura_modelo + entrenamiento, integrados en un solo archivo
+# para simplificar el despliegue — misma lógica ya probada por separado)
+# ============================================================
 
 CARPETA_MODELOS_CACHE = "modelos_subidos_cache"
 LIMITE_FILAS_DATASET = 50_000
@@ -304,9 +323,25 @@ def evaluar_modelo(modelo, datos):
         p50 = np.maximum(0, desescalar(pred["P50"][mask], entidad))
         p10 = np.maximum(0, desescalar(pred["P10"][mask], entidad))
         p90 = np.maximum(0, desescalar(pred["P90"][mask], entidad))
-        mape = np.mean(np.abs((real - p50) / real)) * 100
+
+        # el MAPE divide por la demanda real, así que un día con demanda
+        # real 0 (posible en datasets con ventas bajas o SKUs nuevos)
+        # produce una división por cero que arruina el promedio completo
+        # (inf/nan) — esos días se excluyen del cálculo y se avisa cuántos
+        # fueron, en vez de fallar en silencio o contaminar la métrica
+        mask_real_no_cero = real != 0
+        dias_excluidos = int((~mask_real_no_cero).sum())
+        if mask_real_no_cero.any():
+            mape = np.mean(np.abs((real[mask_real_no_cero] - p50[mask_real_no_cero]) / real[mask_real_no_cero])) * 100
+        else:
+            mape = float("nan")
         cobertura = ((real >= p10) & (real <= p90)).mean() * 100
-        metricas[entidad] = {"MAPE": round(mape, 2), "Cobertura_P10_P90": round(cobertura, 1)}
+        metricas[entidad] = {
+            "MAPE": round(mape, 2) if not np.isnan(mape) else "N/D (toda la demanda real es 0)",
+            "Cobertura_P10_P90": round(cobertura, 1),
+        }
+        if dias_excluidos > 0:
+            metricas[entidad]["Dias_demanda_cero_excluidos_del_MAPE"] = dias_excluidos
         predicciones_por_entidad[entidad] = {"real": real, "P50": p50, "P10": p10, "P90": p90}
 
     return metricas, predicciones_por_entidad
@@ -363,6 +398,10 @@ def entrenar_o_cargar_modelo(df, config, ventana, horizonte, epocas_solicitadas=
     return modelo, datos, huella, True
 
 
+# ============================================================
+# ESCENARIOS WHAT-IF GENÉRICOS (misma lógica validada en Colab)
+# ============================================================
+
 @dataclass
 class EventoWhatIf:
     variable_afectada: str
@@ -389,7 +428,11 @@ def construir_trayectoria_escenario(df_historico, config, evento, dias_horizonte
             fecha_analoga = f - pd.DateOffset(years=1)
             match = sub[sub[config.columna_fecha] == fecha_analoga]
             valores.append(match[var].values[0] if len(match) > 0 else sub[var].mean())
-        trayectoria[var] = valores
+        # se fuerza float64: si la variable original es entera (ej. una
+        # bandera de promoción 0/1), aplicar un cambio porcentual del
+        # evento más abajo (ej. *1.5) puede dar un valor no entero, y
+        # pandas rechaza guardar un decimal en una columna int64
+        trayectoria[var] = np.array(valores, dtype="float64")
 
     if evento.variable_afectada in trayectoria.columns:
         mask_evento = (trayectoria[config.columna_fecha] >= evento.fecha_inicio) & (
@@ -444,6 +487,10 @@ def pronostico_recursivo(modelo, datos, df_historico, config, entidad, trayector
 
     return pd.DataFrame(resultados)
 
+
+# ============================================================
+# RESUMEN EXPLORATORIO DEL DATASET (rango temporal + estacionalidad)
+# ============================================================
 
 def resumen_roles_columnas(df, esquema):
     """
@@ -533,27 +580,33 @@ def graficar_serie_diaria(df, columna_fecha, columna_entidad, columna_objetivo):
     return fig
 
 
+# ============================================================
+# POLÍTICA DE INVENTARIO GENÉRICA (ROP / SS / Meta T)
+# ============================================================
+
 Z_POR_NIVEL_SERVICIO = {
     "80%": 0.84, "85%": 1.04, "90%": 1.28, "95%": 1.65, "99%": 2.33,
 }
 
 
-def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias, sigma_override=None):
+def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias):
     """
     Replica las fórmulas ya validadas en la tesis (sección 8.4):
     ROP = d̄·LT + SS ; SS = Z·σ·√LT ; T = d̄·(LT+P) + SS
-    d̄ y σ se estiman a partir de las predicciones/demanda real ya
-    calculadas para la entidad (mismo set de test usado en la
-    validación), sin necesidad de una columna de lead time real —
-    el usuario declara el lead time como supuesto.
 
-    Si se pasa sigma_override (ej. derivado del ancho de banda P10-P90
-    de un escenario what-if, donde no existe demanda "real" observada
-    porque es un pronóstico a futuro), se usa ese valor de sigma en vez
-    de calcularlo desde predicciones_entidad["real"].
+    σ se deriva de la incertidumbre que el propio modelo predijo (la
+    separación entre P90 y P50), no de la desviación estándar de la
+    demanda real observada. Así el Stock de Seguridad es dinámico y
+    refleja qué tan seguro está el modelo, tal como se define en el
+    informe: cuando el modelo ve más incertidumbre en una entidad, su
+    banda P90-P50 es más ancha, y el SS crece con ella.
+    Se usa el Z de 90% como referencia fija para "deshacer" esa banda y
+    obtener una σ implícita (P90 = P50 + Z_90·σ despejando σ), sin
+    depender del nivel de servicio que el usuario elija para el SS.
     """
     d_prom = float(np.mean(predicciones_entidad["P50"]))
-    sigma = float(sigma_override) if sigma_override is not None else float(np.std(predicciones_entidad["real"]))
+    z_90 = Z_POR_NIVEL_SERVICIO["90%"]
+    sigma = max(0.0, float(np.mean(predicciones_entidad["P90"] - predicciones_entidad["P50"])) / z_90)
     z = Z_POR_NIVEL_SERVICIO[nivel_servicio]
 
     ss = z * sigma * np.sqrt(lead_time_dias)
@@ -569,6 +622,10 @@ def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_ser
         "Meta_T": round(meta_t),
     }
 
+
+# ============================================================
+# INTERFAZ STREAMLIT
+# ============================================================
 
 def render_seccion_dataset_propio():
     st.header("Sube tu propio dataset")
@@ -726,6 +783,9 @@ def render_seccion_dataset_propio():
     df_guardado = st.session_state["motor_generico_df"]
     config_guardada = st.session_state["motor_generico_config"]
 
+    # ============================================================
+    # ESCENARIO WHAT-IF
+    # ============================================================
     st.subheader("Escenario what-if")
     if not config_guardada.columnas_exogenas:
         st.info("Este dataset no tiene variables exógenas seleccionadas, así que no hay ninguna variable que se pueda simular en un escenario de estrés.")
@@ -894,6 +954,9 @@ def render_seccion_dataset_propio():
                 "La línea blanca es historial real; desde ahí en adelante todo es pronóstico."
             )
 
+    # ============================================================
+    # POLÍTICA DE INVENTARIO (ROP / SS / Meta T)
+    # ============================================================
     st.subheader("Política de inventario (ROP / SS / Meta T)")
     st.caption(
         "Calcula el Punto de Reorden, el Stock de Seguridad y la meta de "
@@ -907,69 +970,9 @@ def render_seccion_dataset_propio():
     nivel_servicio = c2.selectbox("Nivel de servicio deseado", options=list(Z_POR_NIVEL_SERVICIO.keys()), index=2)
     periodo_revision = c3.number_input("Período entre revisiones — P (días)", min_value=1, max_value=90, value=30)
 
-    whatif_activo = st.session_state.get("motor_generico_whatif")
-    usar_whatif = False
-    if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
-        usar_whatif = st.checkbox(
-            f"Usar la demanda del escenario what-if simulado (evento del "
-            f"{whatif_activo['fecha_inicio_evento'].strftime('%Y-%m-%d')} al "
-            f"{whatif_activo['fecha_fin_evento'].strftime('%Y-%m-%d')}), en vez de la demanda histórica",
-            value=True,
-        )
-
     if st.button("Calcular política"):
-        if usar_whatif:
-            pron = whatif_activo["pronostico"]
-            mask_evento = (pron[config_guardada.columna_fecha] >= whatif_activo["fecha_inicio_evento"]) & (
-                pron[config_guardada.columna_fecha] <= whatif_activo["fecha_fin_evento"]
-            )
-            # d̄ se toma del P50 pronosticado por el escenario, así que la
-            # demanda promedio SÍ refleja el escenario simulado.
-            #
-            # σ, en cambio, se mantiene anclado a la variabilidad histórica
-            # real (misma fuente que usa el escenario "sin what-if"), en vez
-            # de derivarse de la banda P10-P90 del propio pronóstico
-            # recursivo. Un pronóstico recursivo (que se retroalimenta de
-            # sus propias predicciones día a día) tiende a mostrarse más
-            # confiado de lo que realmente es a medida que se aleja en el
-            # horizonte, subestimando su propia incertidumbre — usar esa
-            # banda como sigma podría hacer bajar el Stock de Seguridad
-            # incluso cuando la demanda esperada sube, algo poco intuitivo
-            # y poco conservador para una decisión de abastecimiento.
-            p50_evento = pron.loc[mask_evento, "P50"]
-            pred_ent_politica_base = resultado["predicciones"][entidad_politica]
-            pred_ent_politica = {
-                "P50": p50_evento.values,
-                "real": pred_ent_politica_base["real"],  # sigma histórico, no el del pronóstico recursivo
-            }
-            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
-            st.info("Política calculada con la demanda proyectada por el escenario what-if.")
-        else:
-            # FIX: antes esta rama comparaba contra el set de validación
-            # histórico del modelo (resultado["predicciones"]), un período
-            # de tiempo distinto al del pronóstico futuro usado en la rama
-            # "con what-if". Como la demanda tiene tendencia creciente, esa
-            # comparación hacía que el ROP subiera al activar el evento
-            # aunque el evento redujera la demanda, porque en realidad se
-            # estaban comparando dos ventanas temporales distintas, no el
-            # mismo horizonte con y sin el evento.
-            #
-            # Ahora, si hay un escenario what-if calculado para esta misma
-            # entidad, se usa pronostico_base (el mismo horizonte futuro,
-            # generado con cambio_pct=0.0) como el escenario "sin evento",
-            # para que la comparación con/sin evento sea sobre la misma
-            # ventana de tiempo. Si no hay what-if calculado, se mantiene
-            # el comportamiento original (set de validación histórico).
-            if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
-                pron_base = whatif_activo["pronostico_base"]
-                pred_ent_politica_hist = resultado["predicciones"][entidad_politica]
-                pred_ent_politica = {
-                    "P50": pron_base["P50"].values,
-                    "real": pred_ent_politica_hist["real"],  # sigma histórico, igual que en la rama con evento
-                }
-            else:
-                pred_ent_politica = resultado["predicciones"][entidad_politica]
-            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
+        pred_ent_politica = resultado["predicciones"][entidad_politica]
+        politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Punto de Reorden (ROP)", f"{politica['ROP']:,}")
