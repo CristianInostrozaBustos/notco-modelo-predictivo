@@ -1,15 +1,3 @@
-"""
-Sección 4 del sitio — "Sube tu propio dataset".
-
-Conecta los módulos genéricos ya validados (detección de esquema,
-preparación, arquitectura, entrenamiento con caché, what-if) a una
-interfaz Streamlit, sin tocar ni depender de la lógica específica de
-NotCo que ya usan las secciones 1-3.
-
-Se importa y se llama desde app.py cuando la sección seleccionada
-empieza con "4".
-"""
-
 import os
 import hashlib
 import numpy as np
@@ -22,13 +10,6 @@ from tensorflow.keras import layers
 from tensorflow.keras.saving import register_keras_serializable
 from sklearn.preprocessing import MinMaxScaler
 from dataclasses import dataclass, field
-
-
-# ============================================================
-# MÓDULOS GENÉRICOS (schema_detector + pipeline_preparacion +
-# arquitectura_modelo + entrenamiento, integrados en un solo archivo
-# para simplificar el despliegue — misma lógica ya probada por separado)
-# ============================================================
 
 CARPETA_MODELOS_CACHE = "modelos_subidos_cache"
 LIMITE_FILAS_DATASET = 50_000
@@ -104,10 +85,6 @@ def detectar_esquema(df):
 
     excluidas = {col_fecha, col_entidad}
     candidatas_objetivo = [c for c in df.columns if c not in excluidas and _es_numerica_continua(df[c])]
-    # solo columnas numéricas: el motor todavía no soporta variables
-    # exógenas de texto/categóricas (ej. 'insumo_critico' con valores
-    # como 'proteina de arveja'), que requerirían one-hot encoding —
-    # queda como trabajo futuro
     candidatas_exogenas = [
         c for c in df.columns
         if c not in excluidas and pd.api.types.is_numeric_dtype(df[c])
@@ -150,9 +127,6 @@ def preparar_datos(df, config, ventana=30, horizonte=84):
     ds[config.columna_fecha] = pd.to_datetime(ds[config.columna_fecha])
     variables = [config.columna_objetivo] + list(config.columnas_exogenas)
 
-    # validación explícita: todas las variables (objetivo + exógenas)
-    # tienen que ser numéricas — si alguna es de texto, se avisa con un
-    # mensaje claro en vez de fallar con un error críptico de conversión
     no_numericas = [v for v in variables if not pd.api.types.is_numeric_dtype(ds[v])]
     if no_numericas:
         raise ValueError(
@@ -216,15 +190,6 @@ def preparar_datos(df, config, ventana=30, horizonte=84):
 
 @register_keras_serializable(package="motor_generico")
 class SeleccionarPorEntidad(layers.Layer):
-    """
-    Reemplaza la capa Lambda original (tf.gather según entidad_id).
-    Una capa Lambda con función anónima se guarda/recarga de forma
-    frágil en Keras 3 (requiere safe_mode=False y puede perder la
-    referencia a 'tf' al recargarse en un proceso nuevo — justamente
-    lo que pasa cuando el contenedor de Streamlit se reinicia). Una
-    capa propia registrada con @register_keras_serializable se
-    guarda y recarga de forma robusta, sin ese riesgo.
-    """
     def call(self, inputs):
         valores, entidad_id = inputs
         return tf.gather(valores, tf.cast(entidad_id, tf.int32), batch_dims=1)
@@ -323,32 +288,15 @@ def evaluar_modelo(modelo, datos):
         p50 = np.maximum(0, desescalar(pred["P50"][mask], entidad))
         p10 = np.maximum(0, desescalar(pred["P10"][mask], entidad))
         p90 = np.maximum(0, desescalar(pred["P90"][mask], entidad))
-
-        # el MAPE divide por la demanda real, así que un día con demanda
-        # real 0 (posible en datasets con ventas bajas o SKUs nuevos)
-        # produce una división por cero que arruina el promedio completo
-        # (inf/nan) — esos días se excluyen del cálculo y se avisa cuántos
-        # fueron, en vez de fallar en silencio o contaminar la métrica
-        mask_real_no_cero = real != 0
-        dias_excluidos = int((~mask_real_no_cero).sum())
-        if mask_real_no_cero.any():
-            mape = np.mean(np.abs((real[mask_real_no_cero] - p50[mask_real_no_cero]) / real[mask_real_no_cero])) * 100
-        else:
-            mape = float("nan")
+        mape = np.mean(np.abs((real - p50) / real)) * 100
         cobertura = ((real >= p10) & (real <= p90)).mean() * 100
-        metricas[entidad] = {
-            "MAPE": round(mape, 2) if not np.isnan(mape) else "N/D (toda la demanda real es 0)",
-            "Cobertura_P10_P90": round(cobertura, 1),
-        }
-        if dias_excluidos > 0:
-            metricas[entidad]["Dias_demanda_cero_excluidos_del_MAPE"] = dias_excluidos
+        metricas[entidad] = {"MAPE": round(mape, 2), "Cobertura_P10_P90": round(cobertura, 1)}
         predicciones_por_entidad[entidad] = {"real": real, "P50": p50, "P10": p10, "P90": p90}
 
     return metricas, predicciones_por_entidad
 
 
-VERSION_ARQUITECTURA = "v2-capa-registrada"  # cambiar esta cadena invalida automáticamente
-                                              # cualquier modelo cacheado con una arquitectura anterior
+VERSION_ARQUITECTURA = "v2-capa-registrada"
 
 
 def calcular_huella_dataset(df, config, ventana, horizonte):
@@ -361,12 +309,6 @@ def calcular_huella_dataset(df, config, ventana, horizonte):
 
 
 def entrenar_o_cargar_modelo(df, config, ventana, horizonte, epocas_solicitadas=100):
-    """
-    Cachea solo el modelo entrenado (lo costoso). Los datos preparados
-    (scalers, secuencias) se recalculan siempre, porque preparar_datos
-    es rápido (no entrena nada) y así se evita cualquier desajuste
-    entre una metadata guardada y el dataset actual.
-    """
     os.makedirs(CARPETA_MODELOS_CACHE, exist_ok=True)
     huella = calcular_huella_dataset(df, config, ventana, horizonte)
     ruta_modelo = os.path.join(CARPETA_MODELOS_CACHE, f"modelo_{huella}.keras")
@@ -376,18 +318,11 @@ def entrenar_o_cargar_modelo(df, config, ventana, horizonte, epocas_solicitadas=
     if os.path.exists(ruta_modelo):
         try:
             modelo = keras.models.load_model(ruta_modelo, compile=False, safe_mode=False)
-            # sanity check: un modelo cargado puede "cargar" sin error pero
-            # fallar recién al predecir (ej. capas Lambda con closures
-            # rotos al recargarse en un proceso nuevo) — se valida con una
-            # predicción mínima antes de darlo por bueno
             entrada_prueba = datos.X_test[:1]
             entidad_prueba = datos.entidad_ids_test[:1].reshape(-1, 1)
             modelo.predict([entrada_prueba, entidad_prueba], verbose=0)
             return modelo, datos, huella, False
         except Exception:
-            # archivo de caché corrupto o incompatible (interrupción a
-            # mitad del guardado, o generado con una arquitectura vieja)
-            # — se descarta y se reentrena en vez de fallar en el sitio
             os.remove(ruta_modelo)
 
     modelo = construir_modelo_generico(
@@ -397,10 +332,6 @@ def entrenar_o_cargar_modelo(df, config, ventana, horizonte, epocas_solicitadas=
     modelo.save(ruta_modelo)
     return modelo, datos, huella, True
 
-
-# ============================================================
-# ESCENARIOS WHAT-IF GENÉRICOS (misma lógica validada en Colab)
-# ============================================================
 
 @dataclass
 class EventoWhatIf:
@@ -428,10 +359,6 @@ def construir_trayectoria_escenario(df_historico, config, evento, dias_horizonte
             fecha_analoga = f - pd.DateOffset(years=1)
             match = sub[sub[config.columna_fecha] == fecha_analoga]
             valores.append(match[var].values[0] if len(match) > 0 else sub[var].mean())
-        # se fuerza float64: si la variable original es entera (ej. una
-        # bandera de promoción 0/1), aplicar un cambio porcentual del
-        # evento más abajo (ej. *1.5) puede dar un valor no entero, y
-        # pandas rechaza guardar un decimal en una columna int64
         trayectoria[var] = np.array(valores, dtype="float64")
 
     if evento.variable_afectada in trayectoria.columns:
@@ -488,18 +415,7 @@ def pronostico_recursivo(modelo, datos, df_historico, config, entidad, trayector
     return pd.DataFrame(resultados)
 
 
-# ============================================================
-# RESUMEN EXPLORATORIO DEL DATASET (rango temporal + estacionalidad)
-# ============================================================
-
 def resumen_roles_columnas(df, esquema):
-    """
-    Checklist de qué rol cumple cada tipo de columna importante para el
-    motor (fecha, entidad, variable a pronosticar, exógenas), marcando
-    'No detectada' cuando el dataset no trae esa información. No asume
-    nombres de negocio específicos (precio, demanda, etc.) — se basa en
-    los roles genéricos que el motor realmente necesita para funcionar.
-    """
     lineas = []
     lineas.append(f"- **Fecha**: {esquema.columna_fecha if esquema.columna_fecha else 'No detectada'}")
     lineas.append(
@@ -531,11 +447,6 @@ def resumen_temporal_dataset(df, columna_fecha, columna_entidad):
 
 
 def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo):
-    """
-    Promedio mensual de la variable objetivo por entidad, para ver de
-    entrada la estacionalidad del dataset (ej. picos de invierno/verano)
-    antes de entrenar nada.
-    """
     ds = df.copy()
     ds[columna_fecha] = pd.to_datetime(ds[columna_fecha])
     col_ent = columna_entidad
@@ -557,10 +468,6 @@ def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
 
 
 def graficar_serie_diaria(df, columna_fecha, columna_entidad, columna_objetivo):
-    """
-    Serie diaria sin agregar, por entidad — el dato tal cual, día a día,
-    antes de cualquier promedio.
-    """
     ds = df.copy()
     ds[columna_fecha] = pd.to_datetime(ds[columna_fecha])
     col_ent = columna_entidad
@@ -580,33 +487,14 @@ def graficar_serie_diaria(df, columna_fecha, columna_entidad, columna_objetivo):
     return fig
 
 
-# ============================================================
-# POLÍTICA DE INVENTARIO GENÉRICA (ROP / SS / Meta T)
-# ============================================================
-
 Z_POR_NIVEL_SERVICIO = {
     "80%": 0.84, "85%": 1.04, "90%": 1.28, "95%": 1.65, "99%": 2.33,
 }
 
 
-def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias):
-    """
-    Replica las fórmulas ya validadas en la tesis (sección 8.4):
-    ROP = d̄·LT + SS ; SS = Z·σ·√LT ; T = d̄·(LT+P) + SS
-
-    σ se deriva de la incertidumbre que el propio modelo predijo (la
-    separación entre P90 y P50), no de la desviación estándar de la
-    demanda real observada. Así el Stock de Seguridad es dinámico y
-    refleja qué tan seguro está el modelo, tal como se define en el
-    informe: cuando el modelo ve más incertidumbre en una entidad, su
-    banda P90-P50 es más ancha, y el SS crece con ella.
-    Se usa el Z de 90% como referencia fija para "deshacer" esa banda y
-    obtener una σ implícita (P90 = P50 + Z_90·σ despejando σ), sin
-    depender del nivel de servicio que el usuario elija para el SS.
-    """
+def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_servicio, periodo_revision_dias, sigma_override=None):
     d_prom = float(np.mean(predicciones_entidad["P50"]))
-    z_90 = Z_POR_NIVEL_SERVICIO["90%"]
-    sigma = max(0.0, float(np.mean(predicciones_entidad["P90"] - predicciones_entidad["P50"])) / z_90)
+    sigma = float(sigma_override) if sigma_override is not None else float(np.std(predicciones_entidad["real"]))
     z = Z_POR_NIVEL_SERVICIO[nivel_servicio]
 
     ss = z * sigma * np.sqrt(lead_time_dias)
@@ -622,10 +510,6 @@ def calcular_politica_inventario(predicciones_entidad, lead_time_dias, nivel_ser
         "Meta_T": round(meta_t),
     }
 
-
-# ============================================================
-# INTERFAZ STREAMLIT
-# ============================================================
 
 def render_seccion_dataset_propio():
     st.header("Sube tu propio dataset")
@@ -731,9 +615,6 @@ def render_seccion_dataset_propio():
         st.session_state["motor_generico_resultado"] = {
             "metricas": metricas, "predicciones": predicciones, "se_entreno": se_entreno,
         }
-        # se guardan también el modelo, los datos preparados, el dataframe
-        # original y la configuración de columnas, para poder correr
-        # escenarios what-if y la política de inventario sin reentrenar
         st.session_state["motor_generico_modelo"] = modelo
         st.session_state["motor_generico_datos"] = datos
         st.session_state["motor_generico_df"] = df
@@ -783,9 +664,6 @@ def render_seccion_dataset_propio():
     df_guardado = st.session_state["motor_generico_df"]
     config_guardada = st.session_state["motor_generico_config"]
 
-    # ============================================================
-    # ESCENARIO WHAT-IF
-    # ============================================================
     st.subheader("Escenario what-if")
     if not config_guardada.columnas_exogenas:
         st.info("Este dataset no tiene variables exógenas seleccionadas, así que no hay ninguna variable que se pueda simular en un escenario de estrés.")
@@ -847,19 +725,11 @@ def render_seccion_dataset_propio():
                 variable_afectada=variable_afectada, fecha_inicio=fecha_inicio_evento,
                 fecha_fin=fecha_fin_evento, cambio_pct=cambio_pct, entidad=entidad_whatif,
             )
-            # línea base sin ningún cambio (cambio_pct=0), para poder
-            # aislar visualmente el efecto puro del evento — sin esto, el
-            # efecto de una variable con impacto chico queda tapado por
-            # la estacionalidad semanal/mensual normal del negocio
             evento_base = EventoWhatIf(
                 variable_afectada=variable_afectada, fecha_inicio=fecha_inicio_evento,
                 fecha_fin=fecha_fin_evento, cambio_pct=0.0, entidad=entidad_whatif,
             )
             with st.spinner("Generando pronóstico recursivo día a día..."):
-                # el pronóstico SIEMPRE arranca justo después del fin del
-                # historial (fecha_min_pronostico) — el evento puede caer
-                # en cualquier punto dentro de ese horizonte, no tiene que
-                # coincidir con el primer día pronosticado
                 trayectoria = construir_trayectoria_escenario(
                     df_guardado, config_guardada, evento,
                     dias_horizonte=int(dias_horizonte_whatif), fecha_inicio_pronostico=fecha_min_pronostico,
@@ -875,9 +745,6 @@ def render_seccion_dataset_propio():
                     modelo, datos, df_guardado, config_guardada, entidad_whatif, trayectoria_base
                 )
 
-            # aviso si el escenario empuja la variable fuera del rango que
-            # el modelo vio durante el entrenamiento — fuera de ese rango
-            # el modelo extrapola y su comportamiento deja de ser confiable
             mask_evento = (trayectoria[config_guardada.columna_fecha] >= fecha_inicio_evento) & (
                 trayectoria[config_guardada.columna_fecha] <= fecha_fin_evento
             )
@@ -894,8 +761,6 @@ def render_seccion_dataset_propio():
                 - pronostico_base.loc[mask_dias_evento_pron, "P50"].values
             ).mean()
 
-            # historial real previo al pronóstico, para dar contexto visual
-            # de dónde viene la curva (mismo criterio usado en NotCo)
             historial_reciente = df_guardado[
                 (df_guardado[config_guardada.columna_entidad] == entidad_whatif)
                 & (df_guardado[config_guardada.columna_fecha] < fecha_min_pronostico)
@@ -954,9 +819,6 @@ def render_seccion_dataset_propio():
                 "La línea blanca es historial real; desde ahí en adelante todo es pronóstico."
             )
 
-    # ============================================================
-    # POLÍTICA DE INVENTARIO (ROP / SS / Meta T)
-    # ============================================================
     st.subheader("Política de inventario (ROP / SS / Meta T)")
     st.caption(
         "Calcula el Punto de Reorden, el Stock de Seguridad y la meta de "
@@ -970,9 +832,41 @@ def render_seccion_dataset_propio():
     nivel_servicio = c2.selectbox("Nivel de servicio deseado", options=list(Z_POR_NIVEL_SERVICIO.keys()), index=2)
     periodo_revision = c3.number_input("Período entre revisiones — P (días)", min_value=1, max_value=90, value=30)
 
+    whatif_activo = st.session_state.get("motor_generico_whatif")
+    usar_whatif = False
+    if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
+        usar_whatif = st.checkbox(
+            f"Usar la demanda del escenario what-if simulado (evento del "
+            f"{whatif_activo['fecha_inicio_evento'].strftime('%Y-%m-%d')} al "
+            f"{whatif_activo['fecha_fin_evento'].strftime('%Y-%m-%d')}), en vez de la demanda histórica",
+            value=True,
+        )
+
     if st.button("Calcular política"):
-        pred_ent_politica = resultado["predicciones"][entidad_politica]
-        politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
+        if usar_whatif:
+            pron = whatif_activo["pronostico"]
+            mask_evento = (pron[config_guardada.columna_fecha] >= whatif_activo["fecha_inicio_evento"]) & (
+                pron[config_guardada.columna_fecha] <= whatif_activo["fecha_fin_evento"]
+            )
+            p50_evento = pron.loc[mask_evento, "P50"]
+            pred_ent_politica_base = resultado["predicciones"][entidad_politica]
+            pred_ent_politica = {
+                "P50": p50_evento.values,
+                "real": pred_ent_politica_base["real"],
+            }
+            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
+            st.info("Política calculada con la demanda proyectada por el escenario what-if.")
+        else:
+            if whatif_activo is not None and whatif_activo["entidad"] == entidad_politica:
+                pron_base = whatif_activo["pronostico_base"]
+                pred_ent_politica_hist = resultado["predicciones"][entidad_politica]
+                pred_ent_politica = {
+                    "P50": pron_base["P50"].values,
+                    "real": pred_ent_politica_hist["real"],
+                }
+            else:
+                pred_ent_politica = resultado["predicciones"][entidad_politica]
+            politica = calcular_politica_inventario(pred_ent_politica, lead_time_dias, nivel_servicio, periodo_revision)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Punto de Reorden (ROP)", f"{politica['ROP']:,}")
