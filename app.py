@@ -9,7 +9,7 @@ from tensorflow.keras import layers
 from sklearn.preprocessing import MinMaxScaler
 from pagina_dataset_propio import render_seccion_dataset_propio
 
-st.set_page_config(page_title="Modelo Predictivo", page_icon="favicon.png", layout="wide")
+st.set_page_config(page_title="NotCo — Modelo Predictivo", page_icon="📦", layout="wide")
 
 VARIABLES = ["demanda_unidades", "promocion", "indice_estres_insumos", "precio_clp"]
 VENTANA = 30
