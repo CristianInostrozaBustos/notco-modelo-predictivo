@@ -251,7 +251,7 @@ if vista == "NotCo":
         mejora_pct = (mape_naive - mape_sku) / mape_naive * 100
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("MAPE naive estacional (sin modelo)", f"{mape_naive:.1f}%")
+        c1.metric("MAPE sin modelo", f"{mape_naive:.1f}%")
         c2.metric("MAPE modelo LSTM", f"{mape_sku:.1f}%")
         c3.metric("Mejora", f"{mejora_pct:+.1f}%")
 
