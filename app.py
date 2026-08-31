@@ -246,12 +246,7 @@ if vista == "NotCo":
         c2.metric("Stock de seguridad (SS)", f"{ss:,} u.")
         c3.metric("ROP diario (alarma)", f"{rop_diario:,} u.")
 
-        st.subheader("¿Cuánto mejora el LSTM respecto a un enfoque sin modelo predictivo?")
-        st.caption(
-            "Comparación del error de pronóstico (MAPE) sobre el mismo período de prueba, "
-            "contra un baseline naive estacional (predecir que la demanda de hoy es igual "
-            "a la de hace 7 días, un heurístico común en planificación manual)."
-        )
+        st.subheader("Mejora del LSTM respecto a un enfoque sin modelo predictivo")
         mape_naive = calcular_mape_naive_estacional(ds_sku, dias_atras=7)
         mejora_pct = (mape_naive - mape_sku) / mape_naive * 100
 
