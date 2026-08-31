@@ -135,6 +135,20 @@ def calcular_meta_periodico(demanda, sigma, lead_time, p, z):
     return round(meta), round(ss)
 
 
+def calcular_mape_naive_estacional(ds_sku, dias_atras=7):
+    n = len(ds_sku)
+    test = ds_sku.iloc[n - HORIZONTE:]
+    pred, real = [], []
+    for _, fila in test.iterrows():
+        fecha_objetivo = fila["fecha"] - pd.Timedelta(days=dias_atras)
+        match = ds_sku[ds_sku["fecha"] == fecha_objetivo]
+        if len(match) > 0:
+            pred.append(match["demanda_unidades"].values[0])
+            real.append(fila["demanda_unidades"])
+    pred, real = np.array(pred), np.array(real)
+    return np.mean(np.abs((real - pred) / real)) * 100
+
+
 def calcular_rop_diario(demanda, sigma, lead_time, z):
     ss = z * sigma * np.sqrt(lead_time)
     rop = demanda * lead_time + ss
@@ -231,6 +245,20 @@ if vista == "NotCo":
         c1.metric("Meta (T) del mes", f"{meta:,} u.")
         c2.metric("Stock de seguridad (SS)", f"{ss:,} u.")
         c3.metric("ROP diario (alarma)", f"{rop_diario:,} u.")
+
+        st.subheader("¿Cuánto mejora el LSTM respecto a un enfoque sin modelo predictivo?")
+        st.caption(
+            "Comparación del error de pronóstico (MAPE) sobre el mismo período de prueba, "
+            "contra un baseline naive estacional (predecir que la demanda de hoy es igual "
+            "a la de hace 7 días, un heurístico común en planificación manual)."
+        )
+        mape_naive = calcular_mape_naive_estacional(ds_sku, dias_atras=7)
+        mejora_pct = (mape_naive - mape_sku) / mape_naive * 100
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("MAPE naive estacional (sin modelo)", f"{mape_naive:.1f}%")
+        c2.metric("MAPE modelo LSTM", f"{mape_sku:.1f}%")
+        c3.metric("Mejora", f"{mejora_pct:+.1f}%")
 
     elif seccion.startswith("2"):
         st.header(f"Escenario what-if: estrés de abastecimiento — {insumo_nombre} ({proc_primaria})")
