@@ -16,6 +16,7 @@ CARPETA_MODELOS_CACHE = "modelos_subidos_cache"
 LIMITE_FILAS_DATASET = 50_000
 LIMITE_EPOCAS = 100
 PACIENCIA_EARLY_STOPPING = 10
+LIMITE_ENTIDADES_MODELO_ENTIDAD = 30
 
 
 @dataclass
@@ -29,7 +30,7 @@ class EsquemaDetectado:
     advertencias: list = field(default_factory=list)
 
 
-def fecha(serie):
+def _parsear_fecha_robusto(serie):
     formatos_conocidos = ["%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%d/%m/%Y", "%m/%d/%Y"]
     mejor_resultado = None
     mejor_validos = -1
@@ -51,7 +52,7 @@ def _score_columna_fecha(serie):
     if pd.api.types.is_numeric_dtype(serie):
         return 0.0
     try:
-        parsed = fecha(serie)
+        parsed = _parsear_fecha_robusto(serie)
         return parsed.notna().mean()
     except Exception:
         return 0.0
@@ -140,7 +141,7 @@ class DatosPreparados:
 
 def preparar_datos(df, config, ventana=30, horizonte=84):
     ds = df.copy()
-    ds[config.columna_fecha] = fecha(ds[config.columna_fecha])
+    ds[config.columna_fecha] = _parsear_fecha_robusto(ds[config.columna_fecha])
     variables = [config.columna_objetivo] + list(config.columnas_exogenas)
 
     no_numericas = [v for v in variables if not pd.api.types.is_numeric_dtype(ds[v])]
@@ -211,9 +212,10 @@ class SeleccionarPorEntidad(layers.Layer):
         return tf.gather(valores, tf.cast(entidad_id, tf.int32), batch_dims=1)
 
 
-def construir_modelo_generico(ventana, n_variables, n_entidades,
-                               unidades_lstm_1=64, unidades_lstm_2=32,
-                               unidades_dense_tronco=16, unidades_dense_cabeza=16, dropout=0.2):
+# modelo por entidad
+def construir_modelo_entidad(ventana, n_variables, n_entidades,
+                              unidades_lstm_1=64, unidades_lstm_2=32,
+                              unidades_dense_tronco=16, unidades_dense_cabeza=16, dropout=0.2):
     entrada_serie = layers.Input(shape=(ventana, n_variables), name="serie")
     entrada_entidad = layers.Input(shape=(1,), dtype="int32", name="entidad_id")
 
@@ -249,6 +251,50 @@ def construir_modelo_generico(ventana, n_variables, n_entidades,
     )
 
 
+# modelo embedding
+def construir_modelo_embedding(ventana, n_variables, n_entidades,
+                                dim_embedding=8, unidades_lstm_1=64, unidades_lstm_2=32,
+                                unidades_dense_tronco=16, dropout=0.2):
+    entrada_serie = layers.Input(shape=(ventana, n_variables), name="serie")
+    entrada_entidad = layers.Input(shape=(1,), dtype="int32", name="entidad_id")
+
+    embedding = layers.Embedding(input_dim=n_entidades, output_dim=dim_embedding, name="embedding_entidad")(entrada_entidad)
+    embedding = layers.Flatten()(embedding)
+
+    x = layers.LSTM(unidades_lstm_1, return_sequences=True)(entrada_serie)
+    x = layers.Dropout(dropout)(x)
+    x = layers.LSTM(unidades_lstm_2)(x)
+    x = layers.Dropout(dropout)(x)
+    x = layers.Concatenate()([x, embedding])
+    x = layers.Dense(unidades_dense_tronco, activation="relu")(x)
+
+    p50 = layers.Dense(1)(x)
+    delta90 = layers.Dense(1, activation="softplus")(x)
+    delta10 = layers.Dense(1, activation="softplus")(x)
+    p90 = layers.Add()([p50, delta90])
+    p10 = layers.Subtract()([p50, delta10])
+
+    return keras.Model(
+        inputs=[entrada_serie, entrada_entidad],
+        outputs={"P50": p50, "P90": p90, "P10": p10},
+    )
+
+
+def elegir_modo_arquitectura(n_entidades):
+    if n_entidades <= LIMITE_ENTIDADES_MODELO_ENTIDAD:
+        return "por_entidad"
+    return "embedding"
+
+
+def construir_modelo(ventana, n_variables, n_entidades):
+    modo = elegir_modo_arquitectura(n_entidades)
+    if modo == "por_entidad":
+        modelo = construir_modelo_entidad(ventana, n_variables, n_entidades)
+    else:
+        modelo = construir_modelo_embedding(ventana, n_variables, n_entidades)
+    return modelo, modo
+
+
 def _pinball(q):
     def loss(y_true, y_pred):
         error = y_true - y_pred
@@ -259,8 +305,6 @@ def _pinball(q):
 def estimar_viabilidad(n_filas_dataset, n_entidades):
     if n_filas_dataset > LIMITE_FILAS_DATASET:
         return False, f"El dataset tiene {n_filas_dataset:,} filas, por sobre el límite de {LIMITE_FILAS_DATASET:,} para entrenar en este sitio."
-    if n_entidades > 30:
-        return False, f"El dataset tiene {n_entidades} entidades, por sobre el máximo recomendado (30) para este sitio."
     return True, "OK"
 
 
@@ -337,6 +381,7 @@ def entrenar_o_cargar_modelo(df, config, ventana, horizonte, epocas_solicitadas=
     ruta_modelo = os.path.join(CARPETA_MODELOS_CACHE, f"modelo_{huella}.keras")
 
     datos = preparar_datos(df, config, ventana=ventana, horizonte=horizonte)
+    modo = elegir_modo_arquitectura(len(datos.entidad_a_id))
 
     if os.path.exists(ruta_modelo):
         try:
@@ -344,19 +389,19 @@ def entrenar_o_cargar_modelo(df, config, ventana, horizonte, epocas_solicitadas=
             entrada_prueba = datos.X_test[:1]
             entidad_prueba = datos.entidad_ids_test[:1].reshape(-1, 1)
             modelo.predict([entrada_prueba, entidad_prueba], verbose=0)
-            return modelo, datos, huella, False
+            return modelo, datos, huella, False, modo
         except Exception:
             os.remove(ruta_modelo)
 
     SEMILLA = 42
     np.random.seed(SEMILLA)
     tf.random.set_seed(SEMILLA)
-    modelo = construir_modelo_generico(
+    modelo, modo = construir_modelo(
         ventana=datos.ventana, n_variables=len(datos.variables), n_entidades=len(datos.entidad_a_id),
     )
     entrenar_modelo_generico(modelo, datos, epocas_solicitadas=epocas_solicitadas)
     modelo.save(ruta_modelo)
-    return modelo, datos, huella, True
+    return modelo, datos, huella, True, modo
 
 
 @dataclass
@@ -370,7 +415,7 @@ class EventoWhatIf:
 
 def construir_trayectoria_escenario(df_historico, config, evento, dias_horizonte, fecha_inicio_pronostico):
     ds = df_historico.copy()
-    ds[config.columna_fecha] = fecha(ds[config.columna_fecha])
+    ds[config.columna_fecha] = _parsear_fecha_robusto(ds[config.columna_fecha])
     col_entidad = config.columna_entidad or "_entidad_generica"
     if col_entidad == "_entidad_generica" and col_entidad not in ds.columns:
         ds[col_entidad] = "serie_unica"
@@ -402,7 +447,7 @@ def pronostico_recursivo(modelo, datos, df_historico, config, entidad, trayector
     variables = datos.variables
 
     ds = df_historico.copy()
-    ds[config.columna_fecha] = fecha(ds[config.columna_fecha])
+    ds[config.columna_fecha] = _parsear_fecha_robusto(ds[config.columna_fecha])
     col_entidad = config.columna_entidad or "_entidad_generica"
     if col_entidad == "_entidad_generica" and col_entidad not in ds.columns:
         ds[col_entidad] = "serie_unica"
@@ -460,7 +505,7 @@ def resumen_roles_columnas(df, esquema):
 
 
 def resumen_temporal_dataset(df, columna_fecha, columna_entidad):
-    fechas = fecha(df[columna_fecha])
+    fechas = _parsear_fecha_robusto(df[columna_fecha])
     fecha_min, fecha_max = fechas.min(), fechas.max()
     dias_totales = (fecha_max - fecha_min).days
     anios_aprox = dias_totales / 365.25
@@ -474,7 +519,7 @@ def resumen_temporal_dataset(df, columna_fecha, columna_entidad):
 
 def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo):
     ds = df.copy()
-    ds[columna_fecha] = fecha(ds[columna_fecha])
+    ds[columna_fecha] = _parsear_fecha_robusto(ds[columna_fecha])
     col_ent = columna_entidad
     if col_ent is None:
         ds["_entidad_generica"] = "serie_unica"
@@ -495,7 +540,7 @@ def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
 
 def graficar_serie_diaria(df, columna_fecha, columna_entidad, columna_objetivo):
     ds = df.copy()
-    ds[columna_fecha] = fecha(ds[columna_fecha])
+    ds[columna_fecha] = _parsear_fecha_robusto(ds[columna_fecha])
     col_ent = columna_entidad
     if col_ent is None:
         ds["_entidad_generica"] = "serie_unica"
@@ -631,7 +676,7 @@ def render_seccion_dataset_propio():
     if st.button("Entrenar / cargar modelo"):
         with st.spinner("Preparando datos y entrenando (puede tardar varios minutos la primera vez)..."):
             try:
-                modelo, datos, huella, se_entreno = entrenar_o_cargar_modelo(
+                modelo, datos, huella, se_entreno, modo = entrenar_o_cargar_modelo(
                     df, config, ventana=int(ventana), horizonte=int(horizonte),
                 )
             except ValueError as e:
@@ -640,7 +685,7 @@ def render_seccion_dataset_propio():
             metricas, predicciones = evaluar_modelo(modelo, datos)
 
         st.session_state["motor_generico_resultado"] = {
-            "metricas": metricas, "predicciones": predicciones, "se_entreno": se_entreno,
+            "metricas": metricas, "predicciones": predicciones, "se_entreno": se_entreno, "modo": modo,
         }
         st.session_state["motor_generico_modelo"] = modelo
         st.session_state["motor_generico_datos"] = datos
@@ -651,10 +696,11 @@ def render_seccion_dataset_propio():
     if resultado is None:
         return
 
+    etiqueta_modo = "modelo por entidad" if resultado["modo"] == "por_entidad" else "modelo embedding (dataset con muchas entidades)"
     if resultado["se_entreno"]:
-        st.success("Modelo entrenado y guardado en caché.")
+        st.success(f"Modelo entrenado y guardado en caché — {etiqueta_modo}.")
     else:
-        st.success("Dataset ya reconocido — modelo cargado desde caché, sin reentrenar.")
+        st.success(f"Dataset ya reconocido — modelo cargado desde caché ({etiqueta_modo}), sin reentrenar.")
 
     st.subheader("Métricas por entidad")
     tabla_metricas = pd.DataFrame(resultado["metricas"]).T
@@ -690,7 +736,7 @@ def render_seccion_dataset_propio():
     st.caption(
         "Calcula el Punto de Reorden, el Stock de Seguridad y la meta de "
         "inventario usando la validación del modelo sobre el período de "
-        "prueba. Refleja cómo se habría comportado "
+        "prueba (el gráfico de arriba). Refleja cómo se habría comportado "
         "la política si se hubiera aplicado en ese período histórico, no "
         "una proyección a futuro."
     )
@@ -746,7 +792,7 @@ def render_seccion_dataset_propio():
                 entidad_whatif = c1.selectbox("Entidad a simular", options=list(datos.entidad_a_id.keys()), key="entidad_whatif")
                 variable_afectada = c2.selectbox("Variable exógena afectada por el evento", options=config_guardada.columnas_exogenas)
 
-                df_guardado[config_guardada.columna_fecha] = fecha(df_guardado[config_guardada.columna_fecha])
+                df_guardado[config_guardada.columna_fecha] = _parsear_fecha_robusto(df_guardado[config_guardada.columna_fecha])
                 fecha_min_pronostico = df_guardado[config_guardada.columna_fecha].max() + pd.Timedelta(days=1)
                 st.caption(
                     f"El pronóstico solo puede proyectarse hacia adelante desde el fin del historial "
