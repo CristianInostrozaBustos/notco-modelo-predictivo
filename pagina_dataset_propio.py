@@ -608,7 +608,7 @@ def render_seccion_dataset_propio():
         "muestra los resultados."
     )
 
-    archivo = st.file_uploader("Archivo CSV", type=["csv"])
+    archivo = st.file_uploader("Archivo CSV o Excel", type=["csv", "xlsx", "xls"])
     if archivo is None:
         st.info("Sube un archivo para comenzar.")
         return
@@ -622,7 +622,22 @@ def render_seccion_dataset_propio():
             st.session_state.pop(clave, None)
         st.session_state["motor_generico_archivo_actual"] = identificador_archivo
 
-    df = pd.read_csv(archivo)
+    es_excel = archivo.name.lower().endswith((".xlsx", ".xls"))
+    try:
+        if es_excel:
+            excel = pd.ExcelFile(archivo)
+            if len(excel.sheet_names) > 1:
+                hoja = st.selectbox("El archivo tiene varias hojas, ¿cuál usamos?", options=excel.sheet_names)
+            else:
+                hoja = excel.sheet_names[0]
+            df = excel.parse(hoja)
+        else:
+            df = pd.read_csv(archivo)
+    except Exception as e:
+        st.error(f"No se pudo leer el archivo ({'Excel' if es_excel else 'CSV'}). Detalle: {e}")
+        return
+
+    df = df.dropna(axis=1, how="all")
     st.write(f"Dataset cargado: {df.shape[0]:,} filas, {df.shape[1]} columnas.")
     st.dataframe(df.head(5))
 
