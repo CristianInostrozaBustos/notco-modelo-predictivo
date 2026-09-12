@@ -29,7 +29,7 @@ class EsquemaDetectado:
     advertencias: list = field(default_factory=list)
 
 
-def _parsear_fecha_robusto(serie):
+def fecha(serie):
     formatos_conocidos = ["%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%d/%m/%Y", "%m/%d/%Y"]
     mejor_resultado = None
     mejor_validos = -1
@@ -51,7 +51,7 @@ def _score_columna_fecha(serie):
     if pd.api.types.is_numeric_dtype(serie):
         return 0.0
     try:
-        parsed = _parsear_fecha_robusto(serie)
+        parsed = fecha(serie)
         return parsed.notna().mean()
     except Exception:
         return 0.0
@@ -140,7 +140,7 @@ class DatosPreparados:
 
 def preparar_datos(df, config, ventana=30, horizonte=84):
     ds = df.copy()
-    ds[config.columna_fecha] = _parsear_fecha_robusto(ds[config.columna_fecha])
+    ds[config.columna_fecha] = fecha(ds[config.columna_fecha])
     variables = [config.columna_objetivo] + list(config.columnas_exogenas)
 
     no_numericas = [v for v in variables if not pd.api.types.is_numeric_dtype(ds[v])]
@@ -370,7 +370,7 @@ class EventoWhatIf:
 
 def construir_trayectoria_escenario(df_historico, config, evento, dias_horizonte, fecha_inicio_pronostico):
     ds = df_historico.copy()
-    ds[config.columna_fecha] = _parsear_fecha_robusto(ds[config.columna_fecha])
+    ds[config.columna_fecha] = fecha(ds[config.columna_fecha])
     col_entidad = config.columna_entidad or "_entidad_generica"
     if col_entidad == "_entidad_generica" and col_entidad not in ds.columns:
         ds[col_entidad] = "serie_unica"
@@ -402,7 +402,7 @@ def pronostico_recursivo(modelo, datos, df_historico, config, entidad, trayector
     variables = datos.variables
 
     ds = df_historico.copy()
-    ds[config.columna_fecha] = _parsear_fecha_robusto(ds[config.columna_fecha])
+    ds[config.columna_fecha] = fecha(ds[config.columna_fecha])
     col_entidad = config.columna_entidad or "_entidad_generica"
     if col_entidad == "_entidad_generica" and col_entidad not in ds.columns:
         ds[col_entidad] = "serie_unica"
@@ -460,7 +460,7 @@ def resumen_roles_columnas(df, esquema):
 
 
 def resumen_temporal_dataset(df, columna_fecha, columna_entidad):
-    fechas = _parsear_fecha_robusto(df[columna_fecha])
+    fechas = fecha(df[columna_fecha])
     fecha_min, fecha_max = fechas.min(), fechas.max()
     dias_totales = (fecha_max - fecha_min).days
     anios_aprox = dias_totales / 365.25
@@ -474,7 +474,7 @@ def resumen_temporal_dataset(df, columna_fecha, columna_entidad):
 
 def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo):
     ds = df.copy()
-    ds[columna_fecha] = _parsear_fecha_robusto(ds[columna_fecha])
+    ds[columna_fecha] = fecha(ds[columna_fecha])
     col_ent = columna_entidad
     if col_ent is None:
         ds["_entidad_generica"] = "serie_unica"
@@ -495,7 +495,7 @@ def graficar_serie_mensual(df, columna_fecha, columna_entidad, columna_objetivo)
 
 def graficar_serie_diaria(df, columna_fecha, columna_entidad, columna_objetivo):
     ds = df.copy()
-    ds[columna_fecha] = _parsear_fecha_robusto(ds[columna_fecha])
+    ds[columna_fecha] = fecha(ds[columna_fecha])
     col_ent = columna_entidad
     if col_ent is None:
         ds["_entidad_generica"] = "serie_unica"
@@ -690,7 +690,7 @@ def render_seccion_dataset_propio():
     st.caption(
         "Calcula el Punto de Reorden, el Stock de Seguridad y la meta de "
         "inventario usando la validación del modelo sobre el período de "
-        "prueba (el gráfico de arriba). Refleja cómo se habría comportado "
+        "prueba. Refleja cómo se habría comportado "
         "la política si se hubiera aplicado en ese período histórico, no "
         "una proyección a futuro."
     )
@@ -746,7 +746,7 @@ def render_seccion_dataset_propio():
                 entidad_whatif = c1.selectbox("Entidad a simular", options=list(datos.entidad_a_id.keys()), key="entidad_whatif")
                 variable_afectada = c2.selectbox("Variable exógena afectada por el evento", options=config_guardada.columnas_exogenas)
 
-                df_guardado[config_guardada.columna_fecha] = _parsear_fecha_robusto(df_guardado[config_guardada.columna_fecha])
+                df_guardado[config_guardada.columna_fecha] = fecha(df_guardado[config_guardada.columna_fecha])
                 fecha_min_pronostico = df_guardado[config_guardada.columna_fecha].max() + pd.Timedelta(days=1)
                 st.caption(
                     f"El pronóstico solo puede proyectarse hacia adelante desde el fin del historial "
