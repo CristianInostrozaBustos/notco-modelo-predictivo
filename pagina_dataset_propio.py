@@ -1,6 +1,5 @@
 import os
 import hashlib
-import warnings
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -31,17 +30,21 @@ class EsquemaDetectado:
 
 
 def _parsear_fecha_robusto(serie):
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        intento_mes_primero = pd.to_datetime(serie, errors="coerce", dayfirst=False)
-        intento_dia_primero = pd.to_datetime(serie, errors="coerce", dayfirst=True)
-
-    validos_mes_primero = intento_mes_primero.notna().sum()
-    validos_dia_primero = intento_dia_primero.notna().sum()
-
-    if validos_dia_primero > validos_mes_primero:
-        return intento_dia_primero
-    return intento_mes_primero
+    formatos_conocidos = ["%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%d/%m/%Y", "%m/%d/%Y"]
+    mejor_resultado = None
+    mejor_validos = -1
+    for fmt in formatos_conocidos:
+        try:
+            intento = pd.to_datetime(serie, format=fmt, errors="coerce")
+        except Exception:
+            continue
+        validos = intento.notna().sum()
+        if validos > mejor_validos:
+            mejor_validos = validos
+            mejor_resultado = intento
+    if mejor_resultado is not None and mejor_validos > 0:
+        return mejor_resultado
+    return pd.to_datetime(serie, errors="coerce")
 
 
 def _score_columna_fecha(serie):
