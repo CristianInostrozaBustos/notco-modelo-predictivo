@@ -79,6 +79,18 @@ def _es_numerica_continua(serie):
     return pd.api.types.is_numeric_dtype(serie) and serie.nunique() > 10
 
 
+def _es_variable_binaria(serie):
+    valores_unicos = pd.Series(serie.dropna().unique())
+    return len(valores_unicos) <= 2 and valores_unicos.isin([0, 1]).all()
+
+
+def _etiquetas_variable_binaria(nombre_variable):
+    nombre = nombre_variable.lower()
+    if "holiday" in nombre or "feriado" in nombre:
+        return "Feriado", "Día laboral"
+    return "Activo (1)", "Inactivo (0)"
+
+
 def detectar_esquema(df):
     n_filas = len(df)
     advertencias = []
@@ -411,6 +423,7 @@ class EventoWhatIf:
     fecha_fin: pd.Timestamp
     cambio_pct: float
     entidad: str
+    valor_fijo: "float | None" = None
 
 
 def construir_trayectoria_escenario(df_historico, config, evento, dias_horizonte, fecha_inicio_pronostico):
@@ -436,7 +449,10 @@ def construir_trayectoria_escenario(df_historico, config, evento, dias_horizonte
         mask_evento = (trayectoria[config.columna_fecha] >= evento.fecha_inicio) & (
             trayectoria[config.columna_fecha] <= evento.fecha_fin
         )
-        trayectoria.loc[mask_evento, evento.variable_afectada] *= (1 + evento.cambio_pct)
+        if evento.valor_fijo is not None:
+            trayectoria.loc[mask_evento, evento.variable_afectada] = evento.valor_fijo
+        else:
+            trayectoria.loc[mask_evento, evento.variable_afectada] *= (1 + evento.cambio_pct)
 
     return trayectoria
 
@@ -596,6 +612,15 @@ def render_seccion_dataset_propio():
     if archivo is None:
         st.info("Sube un archivo para comenzar.")
         return
+
+    identificador_archivo = getattr(archivo, "file_id", None) or f"{archivo.name}_{archivo.size}"
+    if st.session_state.get("motor_generico_archivo_actual") != identificador_archivo:
+        for clave in [
+            "motor_generico_resultado", "motor_generico_modelo", "motor_generico_datos",
+            "motor_generico_df", "motor_generico_config", "motor_generico_whatif",
+        ]:
+            st.session_state.pop(clave, None)
+        st.session_state["motor_generico_archivo_actual"] = identificador_archivo
 
     df = pd.read_csv(archivo)
     st.write(f"Dataset cargado: {df.shape[0]:,} filas, {df.shape[1]} columnas.")
@@ -785,13 +810,14 @@ def render_seccion_dataset_propio():
             texto_rangos = " · ".join(
                 f"**{var}**: {mn:.1f} a {mx:.1f}" for var, (mn, mx) in rangos_historicos.items()
             )
-            st.caption(f"Rango histórico real de cada variable (para elegir un % de cambio realista): {texto_rangos}")
+            st.caption(f"Rango histórico real de cada variable (referencia para elegir un escenario realista): {texto_rangos}")
+
+            c1, c2 = st.columns(2)
+            entidad_whatif = c1.selectbox("Entidad a simular", options=list(datos.entidad_a_id.keys()), key="entidad_whatif")
+            variable_afectada = c2.selectbox("Variable exógena afectada por el evento", options=config_guardada.columnas_exogenas, key="variable_whatif")
+            es_binaria = _es_variable_binaria(df_guardado[variable_afectada])
 
             with st.form("form_whatif_generico"):
-                c1, c2 = st.columns(2)
-                entidad_whatif = c1.selectbox("Entidad a simular", options=list(datos.entidad_a_id.keys()), key="entidad_whatif")
-                variable_afectada = c2.selectbox("Variable exógena afectada por el evento", options=config_guardada.columnas_exogenas)
-
                 df_guardado[config_guardada.columna_fecha] = _parsear_fecha_robusto(df_guardado[config_guardada.columna_fecha])
                 fecha_min_pronostico = df_guardado[config_guardada.columna_fecha].max() + pd.Timedelta(days=1)
                 st.caption(
@@ -808,7 +834,17 @@ def render_seccion_dataset_propio():
                     "Fin del evento", value=(fecha_min_pronostico + pd.Timedelta(days=29)).date(), min_value=fecha_min_pronostico.date(),
                 )
                 c5, c6 = st.columns(2)
-                cambio_pct = c5.slider("Cambio en la variable durante el evento (%)", -90, 200, 30) / 100
+                if es_binaria:
+                    etiqueta_uno, etiqueta_cero = _etiquetas_variable_binaria(variable_afectada)
+                    estado_evento = c5.selectbox(
+                        f"Estado de '{variable_afectada}' durante el evento (todos los días del rango)",
+                        options=[etiqueta_uno, etiqueta_cero],
+                    )
+                    valor_fijo = 1.0 if estado_evento == etiqueta_uno else 0.0
+                    cambio_pct = 0.0
+                else:
+                    cambio_pct = c5.slider("Cambio en la variable durante el evento (%)", -90, 200, 30) / 100
+                    valor_fijo = None
                 dias_horizonte_whatif = c6.number_input(
                     "Horizonte total del pronóstico, desde el fin del historial (días)",
                     min_value=30, max_value=365, value=90,
@@ -833,11 +869,11 @@ def render_seccion_dataset_propio():
 
                 evento = EventoWhatIf(
                     variable_afectada=variable_afectada, fecha_inicio=fecha_inicio_evento,
-                    fecha_fin=fecha_fin_evento, cambio_pct=cambio_pct, entidad=entidad_whatif,
+                    fecha_fin=fecha_fin_evento, cambio_pct=cambio_pct, entidad=entidad_whatif, valor_fijo=valor_fijo,
                 )
                 evento_base = EventoWhatIf(
                     variable_afectada=variable_afectada, fecha_inicio=fecha_inicio_evento,
-                    fecha_fin=fecha_fin_evento, cambio_pct=0.0, entidad=entidad_whatif,
+                    fecha_fin=fecha_fin_evento, cambio_pct=0.0, entidad=entidad_whatif, valor_fijo=None,
                 )
                 with st.spinner("Generando pronóstico recursivo día a día..."):
                     trayectoria = construir_trayectoria_escenario(
